@@ -22,14 +22,14 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import kotlin.time.Duration.Companion.milliseconds
 
 /** OAuth token 兑换结果 */
 data class OAuthTokens(
     val accessToken: String,
     val refreshToken: String? = null,
     val idToken: String? = null,
-    val expiresIn: Long? = null
+    val expiresIn: Long? = null,
+    val email: String? = null
 )
 
 /** 设备码申请结果（RFC 8628 §3.2） */
@@ -49,7 +49,7 @@ class OAuthTokenException(message: String, val errorCode: String? = null) : Exce
 class OAuthTokenClient(
     private val client: HttpClient = HttpClient(CIO) {
         engine {
-            requestTimeout = 30_000.milliseconds
+            requestTimeout = 30_000L
         }
         expectSuccess = false
     }

@@ -7,6 +7,8 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * OAuth 本地回调监听器
@@ -15,7 +17,7 @@ import io.ktor.server.routing.routing
  * 对齐 CLIProxyAPI 的 WebUI 端口转发器 + 本地 OAuthServer 机制
  */
 class OAuthCallbackServer(
-    private val hostScope: kotlinx.coroutines.CoroutineScope
+    private val hostScope: CoroutineScope
 ) {
     private var server: EmbeddedServer<io.ktor.server.cio.CIOApplicationEngine, io.ktor.server.cio.CIOApplicationEngine.Configuration>? = null
     private val activePort = java.util.concurrent.atomic.AtomicInteger(0)
@@ -55,8 +57,8 @@ class OAuthCallbackServer(
         activePort.set(0)
     }
 
-    private fun kotlinx.coroutines.CoroutineScope.launchSafe(block: suspend () -> Unit) {
-        kotlinx.coroutines.launch {
+    private fun launchSafe(block: suspend () -> Unit) {
+        hostScope.launch {
             try {
                 block()
             } catch (_: Exception) {
