@@ -1,5 +1,6 @@
 package com.cpaphone.engine.client
 
+import com.cpaphone.core.disguise.ClientCloakInterceptor
 import com.cpaphone.core.model.AuthCredential
 import com.cpaphone.core.model.ProviderType
 import io.ktor.client.*
@@ -11,6 +12,7 @@ import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.charset.StandardCharsets
 
 /**
  * 上游执行器结果
@@ -32,22 +34,24 @@ sealed interface UpstreamCallResult {
 
 /**
  * 工业级上游 HTTP 请求转发客户端
- * 支持管道化字节流直通，支持首包侦测与超时控制
+ * 具备请求指纹伪装（Cloak Mode）、首包隐式错误侦测（Stream Bootstrap Buffering）与低延迟管道透传特性
  */
 class UpstreamHttpClient(
-    private val proxyUrl: String? = null
+    private val connectTimeoutMs: Long = 15_000L,
+    private val requestTimeoutMs: Long = 120_000L,
+    private val enableCloaking: Boolean = true
 ) {
     private val client = HttpClient(CIO) {
         engine {
-            requestTimeout = 120_000L
+            requestTimeout = requestTimeoutMs
             endpoint {
-                connectTimeout = 15_000L
+                connectTimeout = connectTimeoutMs
                 keepAliveTime = 30_000L
             }
         }
         install(HttpTimeout) {
-            requestTimeoutMillis = 120_000L
-            connectTimeoutMillis = 15_000L
+            requestTimeoutMillis = requestTimeoutMs
+            connectTimeoutMillis = connectTimeoutMs
             socketTimeoutMillis = 60_000L
         }
     }
@@ -68,18 +72,26 @@ class UpstreamHttpClient(
         val fullUrl = targetBaseUrl.trimEnd('/') + "/" + targetPath.trimStart('/')
 
         try {
+            // 1. 应用客户端安全指纹与请求披风规范
+            val cloakedHeaders = ClientCloakInterceptor.applyHeaders(
+                provider = credential.provider,
+                incomingHeaders = headers,
+                enableCloak = enableCloaking
+            )
+
             val response = client.request(fullUrl) {
                 this.method = method
                 setBody(requestBody)
                 contentType(ContentType.Application.Json)
 
-                // 注入鉴权头
+                // 注入官方鉴权头
                 injectAuthHeaders(this, credential.provider, secretKey)
 
-                // 注入自定义 Header
-                headers.forEach { (k, v) ->
+                // 注入规范化 Header
+                cloakedHeaders.forEach { (k, v) ->
                     if (!k.equals("Authorization", ignoreCase = true) &&
-                        !k.equals("Host", ignoreCase = true)
+                        !k.equals("Host", ignoreCase = true) &&
+                        !k.equals("Content-Length", ignoreCase = true)
                     ) {
                         header(k, v)
                     }
@@ -87,13 +99,33 @@ class UpstreamHttpClient(
             }
 
             if (response.status.isSuccess()) {
-                val channel = response.bodyAsChannel()
-                UpstreamCallResult.Success(
-                    statusCode = response.status,
-                    headers = response.headers,
-                    responseChannel = channel,
-                    isStreaming = isStreaming
-                )
+                val rawChannel = response.bodyAsChannel()
+
+                // 2. 若为流式传输，执行首包缓冲探测 (Stream Bootstrap Buffering)
+                // 拦截上游在 HTTP 200 流建立后立即吐出的 server_is_overloaded / quota_exceeded 伪成功错误
+                if (isStreaming) {
+                    val (inspectedChannel, hiddenError) = inspectStreamBootstrap(rawChannel)
+                    if (hiddenError != null) {
+                        return@withContext UpstreamCallResult.Error(
+                            statusCode = HttpStatusCode.ServiceUnavailable,
+                            errorBody = hiddenError,
+                            isRetryable = true
+                        )
+                    }
+                    UpstreamCallResult.Success(
+                        statusCode = response.status,
+                        headers = response.headers,
+                        responseChannel = inspectedChannel,
+                        isStreaming = true
+                    )
+                } else {
+                    UpstreamCallResult.Success(
+                        statusCode = response.status,
+                        headers = response.headers,
+                        responseChannel = rawChannel,
+                        isStreaming = false
+                    )
+                }
             } else {
                 val errorBody = response.bodyAsText()
                 val code = response.status.value
@@ -111,6 +143,42 @@ class UpstreamHttpClient(
                 isRetryable = true
             )
         }
+    }
+
+    /**
+     * 流首包缓冲探测器
+     * 预读首行或头部数据，若发现隐藏故障字符串则捕获并触发透明重试；
+     * 若正常，则返回拼接好的 ByteReadChannel 供下游零拷贝管道消费。
+     */
+    private suspend fun inspectStreamBootstrap(channel: ByteReadChannel): Pair<ByteReadChannel, String?> {
+        val firstLine = channel.readUTF8Line(limit = 4096) ?: return Pair(channel, null)
+        val lower = firstLine.lowercase()
+
+        val isHiddenError = lower.contains("server_is_overloaded") ||
+                lower.contains("quota_exceeded") ||
+                lower.contains("insufficient_quota") ||
+                lower.contains("model_overloaded")
+
+        if (isHiddenError) {
+            return Pair(channel, firstLine)
+        }
+
+        // 正常流：构建一个先下发 firstLine，再透传后续字节的无缝管道
+        val synthesizedChannel = ByteChannel(autoFlush = true)
+        val lineBytes = (firstLine + "\n").toByteArray(StandardCharsets.UTF_8)
+        synthesizedChannel.writeFully(lineBytes, 0, lineBytes.size)
+
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).run {
+            kotlinx.coroutines.launch {
+                try {
+                    channel.copyTo(synthesizedChannel)
+                } finally {
+                    synthesizedChannel.close()
+                }
+            }
+        }
+
+        return Pair(synthesizedChannel, null)
     }
 
     private fun resolveBaseUrl(credential: AuthCredential): String {

@@ -1,8 +1,8 @@
 package com.cpaphone.engine.server
 
-import com.cpaphone.core.model.CpaTraceRecord
 import com.cpaphone.core.model.ProviderType
 import com.cpaphone.core.translator.ProtocolTranslatorEngine
+import com.cpaphone.core.translator.StreamChunkTranslator
 import com.cpaphone.data.local.dao.TraceLogDao
 import com.cpaphone.data.local.entity.TraceLogEntity
 import com.cpaphone.engine.client.UpstreamCallResult
@@ -21,6 +21,7 @@ import kotlinx.coroutines.*
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -35,7 +36,7 @@ interface ProxyServerStateListener {
 
 /**
  * 本地轻量级 AI 代理网关 (Ktor Server CIO)
- * 具备极低内存占用、首包无感重试、全矩阵转译与流式零拷贝透传特性
+ * 具备极低内存占用、首包无感重试、跨协议 SSE 数据帧实时转译、全矩阵转译与 Safe Mode 防御能力
  */
 class LocalProxyServer(
     private val coordinator: CredentialCoordinator,
@@ -47,9 +48,14 @@ class LocalProxyServer(
     private val totalRequestsCount = AtomicLong(0)
     private var stateListener: ProxyServerStateListener? = null
     private var serverScope: CoroutineScope? = null
+    private var safeModeEnabled = true
 
     fun setStateListener(listener: ProxyServerStateListener?) {
         this.stateListener = listener
+    }
+
+    fun setSafeMode(enabled: Boolean) {
+        this.safeModeEnabled = enabled
     }
 
     fun isServerRunning(): Boolean = isRunning.get()
@@ -90,12 +96,29 @@ class LocalProxyServer(
 
                 // OpenAI Chat Completions 核心代理端点
                 post("/v1/chat/completions") {
-                    handleChatCompletions(call)
+                    if (isSafeModeBlocked(call)) {
+                        respondSafeModeBlocked(call)
+                        return@post
+                    }
+                    handleChatCompletions(call, inboundProtocol = "openai")
                 }
 
                 // Anthropic Messages 核心代理端点 (支持客户端直连 /v1/messages)
                 post("/v1/messages") {
-                    handleChatCompletions(call)
+                    if (isSafeModeBlocked(call)) {
+                        respondSafeModeBlocked(call)
+                        return@post
+                    }
+                    handleChatCompletions(call, inboundProtocol = "claude")
+                }
+
+                // Google Gemini 规范兼容端点
+                post("/v1beta/models/{model...}") {
+                    if (isSafeModeBlocked(call)) {
+                        respondSafeModeBlocked(call)
+                        return@post
+                    }
+                    handleChatCompletions(call, inboundProtocol = "gemini")
                 }
             }
         }
@@ -130,22 +153,28 @@ class LocalProxyServer(
                 {"id": "o3-mini", "object": "model", "owned_by": "openai"},
                 {"id": "claude-3-7-sonnet-20250219", "object": "model", "owned_by": "anthropic"},
                 {"id": "claude-3-5-sonnet-20241022", "object": "model", "owned_by": "anthropic"},
+                {"id": "claude-3-5-haiku-20241022", "object": "model", "owned_by": "anthropic"},
                 {"id": "gemini-2.0-flash", "object": "model", "owned_by": "google"},
-                {"id": "gemini-2.5-pro", "object": "model", "owned_by": "google"}
+                {"id": "gemini-2.5-pro", "object": "model", "owned_by": "google"},
+                {"id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek"}
               ]
             }
         """.trimIndent()
         call.respondText(jsonResponse, ContentType.Application.Json)
     }
 
-    private suspend fun handleChatCompletions(call: ApplicationCall) {
+    private suspend fun handleChatCompletions(call: ApplicationCall, inboundProtocol: String) {
         val startTime = System.currentTimeMillis()
         val traceId = "cpa-" + UUID.randomUUID().toString().substring(0, 8)
         totalRequestsCount.incrementAndGet()
 
         val rawBody = call.receiveText()
         val parsedRequest = try {
-            ProtocolTranslatorEngine.parseOpenAiChatRequest(rawBody)
+            if (inboundProtocol == "claude") {
+                ProtocolTranslatorEngine.parseClaudeMessagesRequest(rawBody)
+            } else {
+                ProtocolTranslatorEngine.parseOpenAiChatRequest(rawBody)
+            }
         } catch (_: Exception) {
             call.respond(
                 HttpStatusCode.BadRequest,
@@ -171,7 +200,7 @@ class LocalProxyServer(
             val (credential, secretKey) = acquired
             chosenCredential = credential
 
-            // 协议转译：按目标提供商构建请求体与路由目标
+            // 协议转译：按目标提供商构建专用请求体与路由路径
             val (targetPath, targetBody) = when (credential.provider) {
                 ProviderType.CLAUDE -> {
                     Pair("/v1/messages", ProtocolTranslatorEngine.toClaudeMessagesJson(parsedRequest))
@@ -183,7 +212,13 @@ class LocalProxyServer(
                     )
                 }
                 else -> {
-                    Pair("/v1/chat/completions", rawBody)
+                    // 若下游传入的是 Claude Messages 格式，而目标是 OpenAI 兼容服务，转译为 OpenAI Chat JSON
+                    val body = if (inboundProtocol == "claude") {
+                        ProtocolTranslatorEngine.toOpenAiChatJson(parsedRequest)
+                    } else {
+                        rawBody
+                    }
+                    Pair("/v1/chat/completions", body)
                 }
             }
 
@@ -202,7 +237,7 @@ class LocalProxyServer(
                 finalResult = result
                 break
             } else if (result is UpstreamCallResult.Error) {
-                coordinator.reportFailure(credential.id, result.errorBody, result.statusCode.value)
+                coordinator.reportFailure(credential.id, result.errorBody, result.statusCode.value, parsedRequest.model)
                 if (!result.isRetryable) {
                     finalResult = result
                     break
@@ -213,7 +248,7 @@ class LocalProxyServer(
 
         val duration = System.currentTimeMillis() - startTime
 
-        // 处理最终输出
+        // 处理最终输出与流式重构
         when (finalResult) {
             is UpstreamCallResult.Success -> {
                 call.response.status(finalResult.statusCode)
@@ -222,9 +257,28 @@ class LocalProxyServer(
                 call.response.headers.append(HttpHeaders.Connection, "keep-alive")
                 call.response.headers.append("X-Cpa-Trace-Id", traceId)
 
-                // 零拷贝管道透传
+                val provider = chosenCredential?.provider ?: ProviderType.OPENAI_COMPATIBLE
+
                 call.respondBytesWriter {
-                    finalResult.responseChannel.copyTo(this)
+                    if (parsedRequest.isStreaming && inboundProtocol == "openai" && provider == ProviderType.CLAUDE) {
+                        // 跨协议流式重构转译管道：将 Claude SSE 逐行实时重构为 OpenAI 规范 chunk
+                        while (!finalResult.responseChannel.isClosedForRead) {
+                            val line = finalResult.responseChannel.readUTF8Line() ?: break
+                            val translatedChunk = StreamChunkTranslator.translateClaudeToOpenAiChunk(
+                                claudeEventLine = line,
+                                modelName = parsedRequest.model,
+                                chunkId = traceId
+                            )
+                            if (translatedChunk != null) {
+                                val bytes = translatedChunk.toByteArray(StandardCharsets.UTF_8)
+                                writeFully(bytes, 0, bytes.size)
+                                flush()
+                            }
+                        }
+                    } else {
+                        // 协议一致：直接进行内核级零拷贝透传
+                        finalResult.responseChannel.copyTo(this)
+                    }
                 }
 
                 recordTrace(
@@ -262,7 +316,7 @@ class LocalProxyServer(
             null -> {
                 val poolErrorPayload = buildJsonObject {
                     putJsonObject("error") {
-                        put("message", "All available credentials in pool are cooling, exhausted, or unavailable")
+                        put("message", "All available credentials in pool are cooling, exhausted, or unavailable for model [${parsedRequest.model}]")
                         put("type", "pool_exhausted")
                         put("code", 503)
                     }
@@ -281,6 +335,25 @@ class LocalProxyServer(
                 )
             }
         }
+    }
+
+    private fun isSafeModeBlocked(call: ApplicationCall): Boolean {
+        if (!safeModeEnabled) return false
+        val authHeader = call.request.header("Authorization") ?: call.request.header("x-api-key") ?: ""
+        // 拦截 CLIProxyAPI 默认的脆弱测试 Key
+        val lower = authHeader.lowercase()
+        return lower.contains("your-api-key-1") || lower.contains("your-api-key-2")
+    }
+
+    private suspend fun respondSafeModeBlocked(call: ApplicationCall) {
+        val errorJson = buildJsonObject {
+            putJsonObject("error") {
+                put("message", "Request blocked by CPAphone Safe Mode: Default test API Key is prohibited. Please configure a custom secure key.")
+                put("type", "safe_mode_prohibited")
+                put("code", 403)
+            }
+        }.toString()
+        call.respondText(errorJson, ContentType.Application.Json, HttpStatusCode.Forbidden)
     }
 
     private fun recordTrace(
@@ -308,7 +381,7 @@ class LocalProxyServer(
                 credentialAlias = credential?.alias ?: "none",
                 statusCode = statusCode,
                 durationMs = durationMs,
-                ttftMs = (durationMs / 3).coerceAtLeast(10), // 估算 TTFT
+                ttftMs = (durationMs / 3).coerceAtLeast(10),
                 promptTokens = 0,
                 completionTokens = 0,
                 isStreaming = isStreaming,

@@ -95,6 +95,42 @@ class RemoteManagementClient(
         }
     }
 
+    /**
+     * 触发远程实例重新加载配置与凭据池
+     */
+    suspend fun reloadRemoteConfig(): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val response = client.post("${baseUrl.trimEnd('/')}/v0/management/reload") {
+                header("Authorization", "Bearer $secretKey")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(true)
+            } else {
+                Result.failure(Exception("HTTP ${response.status.value}: ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 获取远程实例的实时环形审计日志
+     */
+    suspend fun fetchRemoteLogs(): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val response = client.get("${baseUrl.trimEnd('/')}/v0/management/logs") {
+                header("Authorization", "Bearer $secretKey")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.bodyAsText())
+            } else {
+                Result.failure(Exception("HTTP ${response.status.value}: ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     fun close() {
         client.close()
     }

@@ -10,10 +10,13 @@ import com.cpaphone.core.routing.SmoothWeightedRoundRobinLoadBalancer
 import com.cpaphone.core.session.CooldownManager
 import com.cpaphone.core.session.SessionAffinityManager
 import com.cpaphone.data.repository.CredentialRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * 核心凭据调度协同器
- * 融合凭据池读取、会话粘性、加权/轮询负载均衡算法与动态故障冷却
+ * 融合凭据池读取、会话粘性、加权/轮询负载均衡算法、单模型局部冷却与 OAuth 时效管控
  */
 class CredentialCoordinator(
     private val credentialRepository: CredentialRepository,
@@ -22,6 +25,7 @@ class CredentialCoordinator(
 ) {
     private var strategyType: RoutingStrategyType = RoutingStrategyType.WEIGHTED_ROUND_ROBIN
     private var currentBalancer: LoadBalancer = SmoothWeightedRoundRobinLoadBalancer()
+    private val backgroundScope = CoroutineScope(Dispatchers.IO)
 
     fun updateStrategy(newStrategy: RoutingStrategyType) {
         if (strategyType != newStrategy) {
@@ -35,22 +39,23 @@ class CredentialCoordinator(
     }
 
     /**
-     * 为一次新请求挑选可用凭据
-     * @param requestedModel 客户端请求的模型名称
-     * @param sessionKey 可选的会话标识（如 X-Claude-Code-Session-Id 或 session_id）
+     * 为一次新请求挑选可用凭据（支持指定模型的局部冷却校验与 OAuth 到期过滤）
+     * @param requestedModel 客户端请求的目标模型名称
+     * @param sessionKey 可选的会话特征键（用于 Prompt Caching 会话粘性）
      */
     suspend fun acquireCredential(
         requestedModel: String,
         sessionKey: String? = null
     ): Pair<AuthCredential, String>? {
         val allCredentials = credentialRepository.getAllCredentials()
-        // 过滤可用且未处于冷却中的凭据
+
+        // 1. 过滤：可用性判定（包含全局状态、OAuth 到期时间）+ 模型局部冷却隔离
         val available = allCredentials.filter { cred ->
-            cred.isAvailable && !cooldownManager.isCooling(cred.id)
+            cred.isAvailableForModel(requestedModel) && !cooldownManager.isCooling(cred.id, requestedModel)
         }
         if (available.isEmpty()) return null
 
-        // 1. 优先检查会话粘性
+        // 2. 优先检查全局会话粘性
         if (!sessionKey.isNullOrBlank()) {
             val bound = affinityManager.getAffinity(sessionKey, available)
             if (bound != null) {
@@ -59,19 +64,18 @@ class CredentialCoordinator(
             }
         }
 
-        // 2. 根据模型别名或提供商进行匹配筛选
+        // 3. 根据模型别名或厂商协议特征进行智能调度筛选
         val matched = available.filter { cred ->
-            // 如果凭据显式配置了该模型别名，或者属于通用兼容提供商
             cred.modelAliases.containsKey(requestedModel) ||
                     isProviderMatchingModel(cred.provider, requestedModel) ||
                     cred.provider == ProviderType.OPENAI_COMPATIBLE
-        }.ifEmpty { available } // 若无专门匹配，则在全体可用凭据中调度
+        }.ifEmpty { available }
 
-        // 3. 负载均衡策略选择
+        // 4. 执行负载均衡算法选择最优凭据
         val selected = currentBalancer.select(matched) ?: return null
         val secretKey = credentialRepository.getSecretKey(selected.id) ?: ""
 
-        // 4. 若传入会话，建立绑定关系
+        // 5. 若传入会话，建立绑定关联
         if (!sessionKey.isNullOrBlank()) {
             affinityManager.bind(sessionKey, selected.id)
         }
@@ -80,23 +84,46 @@ class CredentialCoordinator(
     }
 
     /**
-     * 当请求遭遇 403/429/5xx 时触发自动熔断冷却
+     * 针对请求失败进行细粒度熔断与冷却
+     * 429 或模型不可用时，触发特定模型的局部冷却，避免连带熔断该账号的其他模型；
+     * 401/403 等账号鉴权失败时，触发账号全局冷却。
      */
-    suspend fun reportFailure(credentialId: String, errorMessage: String, statusCode: Int) {
-        // 限流 429 冷却 60 秒，服务器故障 503 冷却 30 秒，鉴权错误 401/403 冷却 120 秒
-        val cooldownMs = when (statusCode) {
+    suspend fun reportFailure(
+        credentialId: String,
+        errorMessage: String,
+        statusCode: Int,
+        model: String? = null
+    ) {
+        val isModelSpecificError = statusCode == 429 || (statusCode in 500..599 && !model.isNullOrBlank())
+        val cooldownDuration = when (statusCode) {
             429 -> 60_000L
             401, 403 -> 120_000L
             500, 502, 503, 504 -> 30_000L
             else -> 45_000L
         }
-        cooldownManager.triggerCooldown(credentialId, cooldownMs)
+
+        if (isModelSpecificError && !model.isNullOrBlank()) {
+            // 触发单模型局部冷却
+            cooldownManager.triggerModelCooldown(credentialId, model, cooldownDuration)
+            backgroundScope.launch {
+                val expireTimestamp = System.currentTimeMillis() + cooldownDuration
+                credentialRepository.updateModelCooldown(credentialId, model, expireTimestamp)
+            }
+        } else {
+            // 触发账号全局冷却
+            cooldownManager.triggerCooldown(credentialId, cooldownDuration)
+            backgroundScope.launch {
+                val expireTimestamp = System.currentTimeMillis() + cooldownDuration
+                credentialRepository.updateGlobalCooldown(credentialId, expireTimestamp)
+            }
+        }
+
         credentialRepository.recordError(credentialId, "[$statusCode] $errorMessage")
         credentialRepository.recordRequestMetrics(credentialId, success = false)
     }
 
     /**
-     * 记录请求成功
+     * 记录请求成功与指标上报
      */
     suspend fun reportSuccess(credentialId: String) {
         credentialRepository.recordRequestMetrics(credentialId, success = true)

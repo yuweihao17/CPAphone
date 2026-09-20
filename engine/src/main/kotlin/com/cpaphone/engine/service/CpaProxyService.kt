@@ -3,6 +3,10 @@ package com.cpaphone.engine.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -12,11 +16,14 @@ import com.cpaphone.engine.server.ProxyServerStateListener
 
 /**
  * Android 前台保活服务 (Foreground Service)
- * 维持 CPAphone 本地代理长效监听，绑定常驻通知栏，并获取 Partial Wakelock 杜绝系统休眠中断网络连接。
+ * 维持 CPAphone 本地代理长效监听，绑定常驻通知栏，获取 Partial Wakelock，
+ * 并具备网络漫游自动感知与自愈能力（Wi-Fi / 蜂窝网络切换自适应）。
  */
 class CpaProxyService : Service(), ProxyServerStateListener {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     companion object {
         const val CHANNEL_ID = "cpa_proxy_service_channel"
@@ -33,6 +40,7 @@ class CpaProxyService : Service(), ProxyServerStateListener {
         super.onCreate()
         createNotificationChannel()
         acquireWakeLock()
+        registerNetworkWatcher()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -54,6 +62,7 @@ class CpaProxyService : Service(), ProxyServerStateListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        unregisterNetworkWatcher()
         stopProxy()
         releaseWakeLock()
         super.onDestroy()
@@ -74,6 +83,46 @@ class CpaProxyService : Service(), ProxyServerStateListener {
     private fun releaseWakeLock() {
         wakeLock?.let {
             if (it.isHeld) it.release()
+        }
+    }
+
+    private fun registerNetworkWatcher() {
+        try {
+            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+
+            networkCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    // 网络切换自愈：更新通知栏状态
+                    val isRunning = activeServerInstance?.isServerRunning() == true
+                    if (isRunning) {
+                        val notification = buildNotification("运行中", "网络已连接 · 监听: 8317")
+                        val manager = getSystemService(NotificationManager::class.java)
+                        manager?.notify(NOTIFICATION_ID, notification)
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    val isRunning = activeServerInstance?.isServerRunning() == true
+                    if (isRunning) {
+                        val notification = buildNotification("运行中 (离线)", "网络连接中断，等待重连...")
+                        val manager = getSystemService(NotificationManager::class.java)
+                        manager?.notify(NOTIFICATION_ID, notification)
+                    }
+                }
+            }
+            connectivityManager?.registerNetworkCallback(request, networkCallback!!)
+        } catch (_: Exception) {
+            // 忽略权限或平台版本异常
+        }
+    }
+
+    private fun unregisterNetworkWatcher() {
+        try {
+            networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) }
+        } catch (_: Exception) {
         }
     }
 
