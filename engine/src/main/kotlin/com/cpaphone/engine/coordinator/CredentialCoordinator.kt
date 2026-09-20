@@ -47,6 +47,9 @@ class CredentialCoordinator(
         requestedModel: String,
         sessionKey: String? = null
     ): Pair<AuthCredential, String>? {
+        // 定期清理过期内存会话，防止对象泄漏与膨胀
+        affinityManager.cleanExpired()
+
         val allCredentials = credentialRepository.getAllCredentials()
 
         // 1. 过滤：可用性判定（包含全局状态、OAuth 到期时间）+ 模型局部冷却隔离

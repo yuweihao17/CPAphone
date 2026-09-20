@@ -391,6 +391,11 @@ class LocalProxyServer(
                 timestamp = System.currentTimeMillis()
             )
             traceLogDao.insert(entity)
+
+            // 定长环形缓冲区防爆：每写入 20 条日志触发一次自动裁剪，确保表中最多保留 500 条最新审计记录
+            if (totalRequestsCount.get() % 20L == 0L) {
+                traceLogDao.pruneOldLogs()
+            }
         }
     }
 }

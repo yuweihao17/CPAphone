@@ -171,7 +171,11 @@ fun PlaygroundScreen() {
                                 """.trimIndent()
 
                                 val parsed = ProtocolTranslatorEngine.parseOpenAiChatRequest(openAiJson)
-                                val _ = ProtocolTranslatorEngine.toClaudeMessagesJson(parsed)
+                                val previewPayload = if (cred.provider == com.cpaphone.core.model.ProviderType.CLAUDE) {
+                                    ProtocolTranslatorEngine.toClaudeMessagesJson(parsed)
+                                } else {
+                                    ProtocolTranslatorEngine.toOpenAiChatJson(parsed)
+                                }
 
                                 val reply = ChatMessageItem(
                                     isUser = false,
