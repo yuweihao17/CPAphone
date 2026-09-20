@@ -187,15 +187,7 @@ class UpstreamHttpClient(
         if (!customBaseUrl.isNullOrBlank()) {
             return customBaseUrl
         }
-        return when (credential.provider) {
-            ProviderType.CLAUDE -> "https://api.anthropic.com"
-            ProviderType.OPENAI_CODEX -> "https://api.openai.com"
-            ProviderType.GEMINI, ProviderType.ANTIGRAVITY -> "https://generativelanguage.googleapis.com"
-            ProviderType.XAI -> "https://api.x.ai"
-            ProviderType.KIMI -> "https://api.moonshot.cn"
-            ProviderType.VERTEX_AI -> "https://us-central1-aiplatform.googleapis.com"
-            ProviderType.OPENAI_COMPATIBLE -> "https://api.openai.com"
-        }
+        return credential.provider.defaultBaseUrl
     }
 
     private fun injectAuthHeaders(

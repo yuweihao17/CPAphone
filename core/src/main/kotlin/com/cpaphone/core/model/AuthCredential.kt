@@ -6,15 +6,15 @@ import kotlinx.serialization.Serializable
  * 支持的各大 AI 提供商类型枚举，对齐 CLIProxyAPI 架构
  */
 @Serializable
-enum class ProviderType(val identifier: String, val displayName: String) {
-    OPENAI_CODEX("codex", "OpenAI Codex"),
-    CLAUDE("claude", "Anthropic Claude"),
-    GEMINI("gemini", "Google Gemini"),
-    ANTIGRAVITY("antigravity", "Google Antigravity"),
-    VERTEX_AI("vertex", "Google Vertex AI"),
-    XAI("xai", "xAI Grok"),
-    KIMI("kimi", "Moonshot Kimi"),
-    OPENAI_COMPATIBLE("openai-compatibility", "OpenAI Compatible");
+enum class ProviderType(val identifier: String, val displayName: String, val defaultBaseUrl: String) {
+    OPENAI_CODEX("codex", "OpenAI Codex", "https://api.openai.com"),
+    CLAUDE("claude", "Anthropic Claude", "https://api.anthropic.com"),
+    GEMINI("gemini", "Google Gemini", "https://generativelanguage.googleapis.com"),
+    ANTIGRAVITY("antigravity", "Google Antigravity", "https://generativelanguage.googleapis.com"),
+    VERTEX_AI("vertex", "Google Vertex AI", "https://us-central1-aiplatform.googleapis.com"),
+    XAI("xai", "xAI Grok", "https://api.x.ai"),
+    KIMI("kimi", "Moonshot Kimi", "https://api.moonshot.cn"),
+    OPENAI_COMPATIBLE("openai-compatibility", "OpenAI Compatible", "https://api.openai.com");
 
     companion object {
         fun fromIdentifier(id: String): ProviderType {
