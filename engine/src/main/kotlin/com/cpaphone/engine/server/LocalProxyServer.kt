@@ -17,9 +17,10 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -45,6 +46,7 @@ class LocalProxyServer(
     private val isRunning = AtomicBoolean(false)
     private val totalRequestsCount = AtomicLong(0)
     private var stateListener: ProxyServerStateListener? = null
+    private var serverScope: CoroutineScope? = null
 
     fun setStateListener(listener: ProxyServerStateListener?) {
         this.stateListener = listener
@@ -58,6 +60,7 @@ class LocalProxyServer(
     fun start(port: Int = 8317, bindAllInterfaces: Boolean = false) {
         if (isRunning.get()) return
 
+        serverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val host = if (bindAllInterfaces) "0.0.0.0" else "127.0.0.1"
 
         val engine = embeddedServer(CIO, port = port, host = host) {
@@ -110,6 +113,8 @@ class LocalProxyServer(
         if (!isRunning.get()) return
         server?.stop(1000, 2000)
         server = null
+        serverScope?.cancel()
+        serverScope = null
         isRunning.set(false)
         stateListener?.onStateChanged(false, "127.0.0.1", 0)
     }
@@ -234,10 +239,15 @@ class LocalProxyServer(
                 )
             }
             is UpstreamCallResult.Error -> {
-                call.respond(
-                    finalResult.statusCode,
-                    "{\"error\":{\"message\":${finalResult.errorBody},\"type\":\"upstream_error\"}}"
-                )
+                val errorPayload = buildJsonObject {
+                    putJsonObject("error") {
+                        put("message", finalResult.errorBody)
+                        put("type", "upstream_error")
+                        put("code", finalResult.statusCode.value)
+                    }
+                }.toString()
+
+                call.respondText(errorPayload, ContentType.Application.Json, finalResult.statusCode)
                 recordTrace(
                     traceId = traceId,
                     model = parsedRequest.model,
@@ -250,10 +260,15 @@ class LocalProxyServer(
                 )
             }
             null -> {
-                call.respond(
-                    HttpStatusCode.ServiceUnavailable,
-                    "{\"error\":{\"message\":\"All available credentials in pool are cooling or exhausted\",\"type\":\"pool_exhausted\"}}"
-                )
+                val poolErrorPayload = buildJsonObject {
+                    putJsonObject("error") {
+                        put("message", "All available credentials in pool are cooling, exhausted, or unavailable")
+                        put("type", "pool_exhausted")
+                        put("code", 503)
+                    }
+                }.toString()
+
+                call.respondText(poolErrorPayload, ContentType.Application.Json, HttpStatusCode.ServiceUnavailable)
                 recordTrace(
                     traceId = traceId,
                     model = parsedRequest.model,
@@ -278,7 +293,8 @@ class LocalProxyServer(
         retryCount: Int,
         errorMessage: String?
     ) {
-        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+        val scope = serverScope ?: CoroutineScope(Dispatchers.IO)
+        scope.launch {
             val entity = TraceLogEntity(
                 traceId = traceId,
                 clientIp = "127.0.0.1",
