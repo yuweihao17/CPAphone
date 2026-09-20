@@ -11,9 +11,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume
 import org.junit.Test
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertTrue
 
 /**
@@ -23,11 +20,16 @@ import kotlin.test.assertTrue
  *   $env:OAUTH_SMOKE = "1"
  *   .\gradlew.bat :engine:testDebugUnitTest --tests "*AntigravityOAuthSmokeTest*"
  *
- * 流程：生成真实授权 URL（控制台打印）→ 测试者在 PC 浏览器完成 Google 登录 →
- *       浏览器回跳 localhost:51121 进入内嵌 OAuthCallbackServer → 兑换 access_token →
- *       拉取账号 email → 热更新模型目录 → 打印聚合后的 Antigravity 模型清单
+ * 两种模式（OAUTH_SMOKE_MODE）：
+ * - callback（默认）：内嵌 ServerSocket 监听 localhost 回调端口，浏览器授权后自动兑换
+ * - manual：端口被系统级占用时自动降级，用户把浏览器最终地址栏完整 URL 保存到
+ *   D:\Projects\CPAphone\.trae\oauth-manual.txt，测试轮询该文件完成兑换
+ *
+ * 全链路验证：授权 URL → code → 兑换 access_token → 账号 email → 模型目录热更新
  */
 class AntigravityOAuthSmokeTest {
+
+    private val manualFile = java.io.File("D:\\Projects\\CPAphone\\.trae\\oauth-manual.txt")
 
     @Test
     fun antigravityEndToEnd() {
@@ -39,30 +41,61 @@ class AntigravityOAuthSmokeTest {
         val session = sessionManager.startSession(ProviderType.ANTIGRAVITY, spec)
         val authorizeUrl = session.authorizeUrl ?: error("authorize url missing")
 
-        val callbackCode = AtomicReference<String?>()
-        val callbackError = AtomicReference<String?>()
-        val latch = CountDownLatch(1)
-
+        // 尝试自动回调模式；端口被占用则降级手动模式
         val server = OAuthCallbackServer(CoroutineScope(Dispatchers.IO))
+        var callbackMode = true
         try {
             server.start(spec.callbackPort) { code, _, error ->
-                callbackCode.set(code)
-                callbackError.set(error)
-                latch.countDown()
+                if (!code.isNullOrBlank()) {
+                    manualFile.parentFile?.mkdirs()
+                    // 记录回调结果供测试主线程消费（同时兼容手动模式文件协议）
+                    manualFile.writeText("state=${session.state}&code=$code" + (error?.let { "&error=$it" } ?: ""))
+                }
             }
+        } catch (e: Exception) {
+            callbackMode = false
+            println(">>> 自动回调端口不可用（${e.message}），降级为手动粘贴模式")
+        }
+
+        try {
+            manualFile.delete()
             println("================================================================")
             println("请在 PC 浏览器打开以下链接并完成 Google 登录：")
             println(authorizeUrl)
-            println("等待 localhost:${spec.callbackPort} 回调（最长 5 分钟）...")
             println("================================================================")
+            if (callbackMode) {
+                println("等待 localhost:${spec.callbackPort} 自动回调（最长 5 分钟）...")
+            } else {
+                println("授权完成后，浏览器会跳到 localhost 错误页——把地址栏完整网址复制，")
+                println("保存到文件：$manualFile")
+                println("（测试每 5 秒轮询该文件，最长 10 分钟）")
+            }
 
-            assertTrue(latch.await(5, TimeUnit.MINUTES), "5 分钟内未收到浏览器回调")
+            val deadline = if (callbackMode) 5L else 10L
+            var code: String? = null
+            var error: String? = null
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < deadline * 60_000L) {
+                // 处理用户粘贴的完整 URL：先去掉路径部分（首个 ? 之前），再解析键值对
+                if (manualFile.exists()) {
+                    val content = manualFile.readText().substringAfter('?', content)
+                    val params = content.split("&").filter { it.contains('=') }.associate {
+                        it.substringBefore('=') to (it.substringAfter('=', "").let { v ->
+                            java.net.URLDecoder.decode(v, "UTF-8")
+                        })
+                    }
+                    if (params["state"] == session.state && !params["code"].isNullOrBlank()) {
+                        code = params["code"]
+                        error = params["error"]
+                        break
+                    }
+                }
+                Thread.sleep(5000)
+            }
 
-            val error = callbackError.get()
-            assertTrue(error.isNullOrBlank(), "授权端返回错误: $error")
-            val code = callbackCode.get()
-            assertTrue(!code.isNullOrBlank(), "回调未携带授权码")
+            assertTrue(!code.isNullOrBlank(), "${deadline} 分钟内未取得授权码（授权是否完成？文件是否写入？）")
             println(">>> 收到授权码（前 12 位）: ${code!!.take(12)}...")
+            assertTrue(error.isNullOrBlank(), "授权端返回错误: $error")
 
             runBlocking {
                 val client = OAuthTokenClient()
@@ -85,6 +118,7 @@ class AntigravityOAuthSmokeTest {
             }
         } finally {
             server.stop()
+            manualFile.delete()
         }
         println(">>> 冒烟测试全部通过")
     }
