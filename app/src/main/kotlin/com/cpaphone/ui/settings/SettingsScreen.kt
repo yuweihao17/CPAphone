@@ -16,6 +16,8 @@ import androidx.compose.ui.unit.sp
 import com.cpaphone.CpaApplication
 import com.cpaphone.core.model.RoutingStrategyType
 import com.cpaphone.data.repository.RunningMode
+import com.cpaphone.ui.theme.AccentError
+import com.cpaphone.ui.theme.AccentSecondary
 import kotlinx.coroutines.launch
 
 @Composable
@@ -191,7 +193,63 @@ fun SettingsScreen() {
             }
         }
 
-        // 远程 CLIProxyAPI 节点中控连接配置
+        // 本地网关自检（仅本地独立代理形态显示）
+        if (config?.runningMode != RunningMode.REMOTE_MANAGEMENT) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(text = "本地网关自检", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    Text(
+                        text = "当前形态为本地独立代理：本机与局域网 AI 客户端接入下方地址，无需远程节点。服务在运行仪表盘启动/停止。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                    )
+                    var isCheckingLocal by remember { mutableStateOf(false) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "服务运行状态",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                            Text(
+                                text = if (app.localProxyServer.isServerRunning()) "监听中 (:${config?.localPort ?: 8317})" else "未启动",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                color = if (app.localProxyServer.isServerRunning()) AccentSecondary else AccentError
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                isCheckingLocal = true
+                                scope.launch {
+                                    val running = app.localProxyServer.isServerRunning()
+                                    Toast.makeText(
+                                        context,
+                                        if (running) "本地网关运行正常 (:${config?.localPort ?: 8317})" else "本地网关未启动，请先在运行仪表盘启动服务",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    isCheckingLocal = false
+                                }
+                            },
+                            enabled = !isCheckingLocal
+                        ) {
+                            Text(if (isCheckingLocal) "检测中..." else "自检")
+                        }
+                    }
+                }
+            }
+        }
+
+        // 远程 CLIProxyAPI 节点中控连接配置（仅远程中控形态显示）
+        if (config?.runningMode == RunningMode.REMOTE_MANAGEMENT) {
         Card(
             shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
@@ -253,7 +311,11 @@ fun SettingsScreen() {
                                 if (res.isSuccess) {
                                     Toast.makeText(context, "远程节点连通正常！", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    Toast.makeText(context, "连接失败: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(
+                                        context,
+                                        "连接失败: ${res.exceptionOrNull()?.message}（请确认远程节点已部署且地址/端口可达）",
+                                        Toast.LENGTH_LONG
+                                    ).show()
                                 }
                                 isTestingRemote = false
                             }
@@ -277,7 +339,14 @@ fun SettingsScreen() {
                         Text("保存配置")
                     }
                 }
+
+                Text(
+                    text = "「测试连接」访问远程节点的 /healthz 端点；secret-key 为远程 CLIProxyAPI 配置中的管理密钥",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
             }
+        }
         }
 
         // 动态插件中心入口卡片

@@ -183,24 +183,24 @@ class LocalProxyServer(
     }
 
     private suspend fun handleModels(call: ApplicationCall) {
-        val jsonResponse = """
-            {
-              "object": "list",
-              "data": [
-                {"id": "gpt-4o", "object": "model", "owned_by": "openai"},
-                {"id": "gpt-4o-mini", "object": "model", "owned_by": "openai"},
-                {"id": "o1", "object": "model", "owned_by": "openai"},
-                {"id": "o3-mini", "object": "model", "owned_by": "openai"},
-                {"id": "claude-3-7-sonnet-20250219", "object": "model", "owned_by": "anthropic"},
-                {"id": "claude-3-5-sonnet-20241022", "object": "model", "owned_by": "anthropic"},
-                {"id": "claude-3-5-haiku-20241022", "object": "model", "owned_by": "anthropic"},
-                {"id": "gemini-2.0-flash", "object": "model", "owned_by": "google"},
-                {"id": "gemini-2.5-pro", "object": "model", "owned_by": "google"},
-                {"id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek"}
-              ]
+        // 对齐 CLIProxyAPI：/v1/models 按「凭据池中实际存在的提供商」动态聚合，
+        // 不再返回与凭据无关的静态清单（登录 Antigravity 即只见 gemini/antigravity 系模型）
+        val credentials = credentialRepository?.getAllCredentials().orEmpty()
+        val providers = credentials
+            .filter { it.status != com.cpaphone.core.model.CredentialStatus.DISABLED }
+            .map { it.provider }
+            .toSet()
+        val compatAliases = credentials
+            .filter { it.provider == com.cpaphone.core.model.ProviderType.OPENAI_COMPATIBLE }
+            .flatMap { it.modelAliases.entries }
+            .associate { it.key to it.value }
+
+        val data = com.cpaphone.core.model.ModelCatalog
+            .aggregateForProviders(providers, compatAliases)
+            .joinToString(",") { (id, ownedBy) ->
+                """{"id":"$id","object":"model","owned_by":"$ownedBy"}"""
             }
-        """.trimIndent()
-        call.respondText(jsonResponse, ContentType.Application.Json)
+        call.respondText("""{"object":"list","data":[$data]}""", ContentType.Application.Json)
     }
 
     private suspend fun handleChatCompletions(call: ApplicationCall, inboundProtocol: String) {

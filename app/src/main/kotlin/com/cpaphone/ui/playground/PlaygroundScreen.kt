@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cpaphone.CpaApplication
+import com.cpaphone.core.model.CredentialStatus
 import com.cpaphone.core.translator.ProtocolTranslatorEngine
 import com.cpaphone.ui.theme.AccentPurple
 import kotlinx.coroutines.launch
@@ -38,16 +39,15 @@ fun PlaygroundScreen() {
     val messages = remember { mutableStateListOf<ChatMessageItem>() }
     var isLoading by remember { mutableStateOf(false) }
 
-    val presetModels = listOf(
-        "claude-3-7-sonnet-20250219",
-        "claude-3-5-sonnet-20241022",
-        "gpt-4o",
-        "o1",
-        "o3-mini",
-        "gemini-2.0-flash",
-        "deepseek-reasoner"
-    )
-    var selectedModel by remember { mutableStateOf(presetModels[0]) }
+    // 模型清单按凭据池动态聚合（对齐 /v1/models 行为），不再使用静态预设
+    var availableModels by remember { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(Unit) {
+        val creds = app.credentialRepository.getAllCredentials()
+        availableModels = com.cpaphone.core.model.ModelCatalog
+            .aggregateForProviders(creds.filter { it.status != CredentialStatus.DISABLED }.map { it.provider }.toSet())
+            .map { it.first }
+    }
+    var selectedModel by remember { mutableStateOf<String?>(null) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
     var showVoiceConsole by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -95,7 +95,7 @@ fun PlaygroundScreen() {
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         ) {
                             Text(
-                                text = selectedModel.take(14) + if (selectedModel.length > 14) "..." else "",
+                                text = (selectedModel ?: "选择模型").take(14) + if ((selectedModel?.length ?: 0) > 14) "..." else "",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary
@@ -108,7 +108,13 @@ fun PlaygroundScreen() {
                         expanded = modelMenuExpanded,
                         onDismissRequest = { modelMenuExpanded = false }
                     ) {
-                        presetModels.forEach { model ->
+                        if (availableModels.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("暂无可用模型，请先在凭据池登录或添加凭据", fontSize = 12.sp) },
+                                onClick = {}
+                            )
+                        }
+                        availableModels.forEach { model ->
                             DropdownMenuItem(
                                 text = { Text(model, fontSize = 13.sp) },
                                 onClick = {
@@ -170,18 +176,24 @@ fun PlaygroundScreen() {
             IconButton(
                 onClick = {
                     val prompt = inputText.trim()
-                    if (prompt.isNotBlank() && !isLoading) {
+                    val model = selectedModel
+                    if (prompt.isNotBlank() && model == null && !isLoading) {
+                        messages.add(
+                            ChatMessageItem(isUser = false, content = "请先在右上角选择一个模型（模型清单来自凭据池中已登录的服务商）")
+                        )
+                    }
+                    if (prompt.isNotBlank() && model != null && !isLoading) {
                         messages.add(ChatMessageItem(isUser = true, content = prompt))
                         inputText = ""
                         isLoading = true
 
                         scope.launch {
-                            val acquired = app.coordinator.acquireCredential(selectedModel)
+                            val acquired = app.coordinator.acquireCredential(model)
                             if (acquired != null) {
                                 val (cred, _) = acquired
                                 val openAiJson = """
                                     {
-                                      "model": "$selectedModel",
+                                      "model": "$model",
                                       "messages": [{"role": "user", "content": "$prompt"}],
                                       "stream": false
                                     }
@@ -197,15 +209,15 @@ fun PlaygroundScreen() {
                                 val reply = ChatMessageItem(
                                     isUser = false,
                                     content = "已成功通过凭据 [${cred.alias}] 完成调度！\n协议转译与会话粘性正常工作，目标提供商: ${cred.provider.displayName}。",
-                                    thinking = "调度决策完成：根据模型 [$selectedModel] 命中最优凭据 [${cred.id}]，加权系数=${cred.weight}，单模型熔断正常。",
-                                    modelTag = selectedModel
+                                    thinking = "调度决策完成：根据模型 [$model] 命中最优凭据 [${cred.id}]，加权系数=${cred.weight}，单模型熔断正常。",
+                                    modelTag = model
                                 )
                                 messages.add(reply)
                             } else {
                                 messages.add(
                                     ChatMessageItem(
                                         isUser = false,
-                                        content = "错误：当前凭据池无可用账号，或所选模型 [$selectedModel] 正在冷却中，请先在【凭据池】增加有效 Key 或解除冷却。"
+                                        content = "错误：当前凭据池无可用账号，或所选模型 [$model] 正在冷却中，请先在【凭据池】增加有效 Key 或解除冷却。"
                                     )
                                 )
                             }

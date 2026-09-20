@@ -115,8 +115,10 @@ fun DashboardScreen() {
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 14.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
 
-                // 地址与端口信息（可点击一键复制）
-                val baseUrl = "http://${if (config?.allowLanAccess == true) "0.0.0.0" else "127.0.0.1"}:${config?.localPort ?: 8317}/v1"
+                // 地址与端口信息（可点击一键复制）；局域网模式显示真实本机 IP 而非 0.0.0.0
+                val lanIp = remember { resolveLanIpv4() }
+                val displayHost = if (config?.allowLanAccess == true) lanIp else "127.0.0.1"
+                val baseUrl = "http://$displayHost:${config?.localPort ?: 8317}/v1"
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -284,6 +286,20 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
     val clip = ClipData.newPlainText(label, text)
     clipboard.setPrimaryClip(clip)
     Toast.makeText(context, "已复制到剪贴板: $text", Toast.LENGTH_SHORT).show()
+}
+
+/** 获取本机局域网 IPv4 地址；获取失败回退 0.0.0.0（绑定语义不变，仅展示层修正） */
+private fun resolveLanIpv4(): String {
+    return try {
+        java.net.NetworkInterface.getNetworkInterfaces().asSequence()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.asSequence() }
+            .firstOrNull { it is java.net.Inet4Address && !it.isLoopbackAddress }
+            ?.hostAddress
+            ?: "0.0.0.0"
+    } catch (_: Exception) {
+        "0.0.0.0"
+    }
 }
 
 private fun toggleService(context: Context, start: Boolean) {

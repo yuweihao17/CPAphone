@@ -162,6 +162,13 @@ class CredentialCoordinator(
     }
 
     private fun isProviderMatchingModel(provider: ProviderType, model: String): Boolean {
+        // 优先查静态目录反查（对齐 CLIProxyAPI GetProviderName），未知模型再走特征匹配兜底
+        val owners = com.cpaphone.core.model.ModelCatalog.ownersForModel(model)
+        if (owners != null) return provider in owners
+        return isProviderMatchingByHeuristic(provider, model)
+    }
+
+    private fun isProviderMatchingByHeuristic(provider: ProviderType, model: String): Boolean {
         val lower = model.lowercase()
         return when (provider) {
             ProviderType.CLAUDE -> lower.contains("claude")
