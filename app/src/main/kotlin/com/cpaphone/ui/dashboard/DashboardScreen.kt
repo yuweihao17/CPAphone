@@ -36,6 +36,13 @@ fun DashboardScreen() {
     val config by app.appConfigRepository.configFlow.collectAsState(initial = null)
     var isRunning by remember { mutableStateOf(app.localProxyServer.isServerRunning()) }
 
+    val discoveredNodes by app.nsdDiscoveryManager.discoveredNodes.collectAsState()
+    var showRadarDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        app.nsdDiscoveryManager.startDiscovery()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -175,6 +182,85 @@ fun DashboardScreen() {
                 value = if (config?.enableCloaking == true) "已开启 (官方CLI)" else "原始直通"
             )
         }
+
+        // 局域网设备雷达卡片
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showRadarDialog = true }
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(text = "局域网服务发现 (mDNS 雷达)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (discoveredNodes.isEmpty()) "正在持续监听局域网节点..." else "发现 ${discoveredNodes.size} 个同网段可用代理节点",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Text(
+                    text = "查看雷达 >",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+
+    if (showRadarDialog) {
+        AlertDialog(
+            onDismissRequest = { showRadarDialog = false },
+            title = { Text("局域网代理设备雷达") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (discoveredNodes.isEmpty()) {
+                        Text(
+                            text = "未发现同网段运行的 CLIProxyAPI 或 CPAphone 实例。请确保设备处于同一 Wi-Fi 网络下且广播已开启。",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        discoveredNodes.forEach { node ->
+                            Card(
+                                shape = RoundedCornerShape(10.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        copyToClipboard(context, "Node Base URL", node.baseUrl)
+                                    }
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(text = node.name, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "${node.baseUrl} (点击复制)",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showRadarDialog = false }) {
+                    Text("关闭")
+                }
+            }
+        )
     }
 }
 

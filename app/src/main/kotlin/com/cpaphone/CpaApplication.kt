@@ -6,6 +6,7 @@ import com.cpaphone.data.repository.AppConfigRepository
 import com.cpaphone.data.repository.CredentialRepository
 import com.cpaphone.data.security.SecureCredentialStorage
 import com.cpaphone.engine.coordinator.CredentialCoordinator
+import com.cpaphone.engine.discovery.NsdDiscoveryManager
 import com.cpaphone.engine.remote.RemoteManagementClient
 import com.cpaphone.engine.server.LocalProxyServer
 import com.cpaphone.engine.service.CpaProxyService
@@ -29,6 +30,8 @@ class CpaApplication : Application() {
         private set
     lateinit var remoteClient: RemoteManagementClient
         private set
+    lateinit var nsdDiscoveryManager: NsdDiscoveryManager
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -42,6 +45,7 @@ class CpaApplication : Application() {
         coordinator = CredentialCoordinator(credentialRepository)
         localProxyServer = LocalProxyServer(coordinator, database.traceLogDao())
         remoteClient = RemoteManagementClient("http://127.0.0.1:8317", "")
+        nsdDiscoveryManager = NsdDiscoveryManager(this)
 
         // 绑定静态服务实例
         CpaProxyService.activeServerInstance = localProxyServer

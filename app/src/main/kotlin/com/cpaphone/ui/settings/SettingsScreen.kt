@@ -23,6 +23,7 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val app = CpaApplication.instance
     val config by app.appConfigRepository.configFlow.collectAsState(initial = null)
+    val discoveredNodes by app.nsdDiscoveryManager.discoveredNodes.collectAsState()
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
@@ -197,6 +198,29 @@ fun SettingsScreen() {
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(text = "远程节点中控连接", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+
+                // 局域网发现节点一键填入
+                if (discoveredNodes.isNotEmpty()) {
+                    Text(
+                        text = "点击下方同网段已发现节点一键填入:",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        discoveredNodes.take(3).forEach { node ->
+                            SuggestionChip(
+                                onClick = {
+                                    remoteHostInput = node.baseUrl
+                                    Toast.makeText(context, "已填入节点: ${node.name}", Toast.LENGTH_SHORT).show()
+                                },
+                                label = { Text(node.name.take(16), fontSize = 11.sp) }
+                            )
+                        }
+                    }
+                }
 
                 OutlinedTextField(
                     value = remoteHostInput,

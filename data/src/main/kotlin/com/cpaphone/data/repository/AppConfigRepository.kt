@@ -25,6 +25,7 @@ data class AppConfig(
     val routingStrategy: RoutingStrategyType = RoutingStrategyType.WEIGHTED_ROUND_ROBIN,
     val safeModeEnabled: Boolean = true,
     val enableCloaking: Boolean = true,          // 客户端指纹伪装与请求披风开关
+    val enableLanDiscovery: Boolean = true,      // 局域网服务广播与设备雷达发现开关
     val connectTimeoutMs: Long = 15_000L,        // 上游连接超时 (毫秒)
     val requestTimeoutMs: Long = 120_000L,       // 上游总请求超时 (毫秒)
     val outboundProxyUrl: String? = null,
@@ -43,6 +44,7 @@ class AppConfigRepository(private val context: Context) {
         val ROUTING_STRATEGY = stringPreferencesKey("routing_strategy")
         val SAFE_MODE_ENABLED = booleanPreferencesKey("safe_mode_enabled")
         val ENABLE_CLOAKING = booleanPreferencesKey("enable_cloaking")
+        val ENABLE_LAN_DISCOVERY = booleanPreferencesKey("enable_lan_discovery")
         val CONNECT_TIMEOUT_MS = longPreferencesKey("connect_timeout_ms")
         val REQUEST_TIMEOUT_MS = longPreferencesKey("request_timeout_ms")
         val OUTBOUND_PROXY_URL = stringPreferencesKey("outbound_proxy_url")
@@ -64,6 +66,7 @@ class AppConfigRepository(private val context: Context) {
             } ?: RoutingStrategyType.WEIGHTED_ROUND_ROBIN,
             safeModeEnabled = prefs[PreferencesKeys.SAFE_MODE_ENABLED] ?: true,
             enableCloaking = prefs[PreferencesKeys.ENABLE_CLOAKING] ?: true,
+            enableLanDiscovery = prefs[PreferencesKeys.ENABLE_LAN_DISCOVERY] ?: true,
             connectTimeoutMs = prefs[PreferencesKeys.CONNECT_TIMEOUT_MS] ?: 15_000L,
             requestTimeoutMs = prefs[PreferencesKeys.REQUEST_TIMEOUT_MS] ?: 120_000L,
             outboundProxyUrl = prefs[PreferencesKeys.OUTBOUND_PROXY_URL],
@@ -96,6 +99,10 @@ class AppConfigRepository(private val context: Context) {
 
     suspend fun updateCloaking(enabled: Boolean) {
         context.dataStore.edit { it[PreferencesKeys.ENABLE_CLOAKING] = enabled }
+    }
+
+    suspend fun updateLanDiscovery(enabled: Boolean) {
+        context.dataStore.edit { it[PreferencesKeys.ENABLE_LAN_DISCOVERY] = enabled }
     }
 
     suspend fun updateTimeouts(connectTimeoutMs: Long, requestTimeoutMs: Long) {
