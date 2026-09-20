@@ -282,6 +282,20 @@ class OAuthTokenClient(
         header(HttpHeaders.Accept, "application/json")
     }
 
+    /**
+     * 拉取上游模型目录热更新（对齐 CLIProxyAPI model_updater.go 的远程源）
+     * 返回原始 JSON 文本，交由 ModelCatalog.applyRemoteCatalog 解析；失败返回 null（回退内嵌静态目录）
+     */
+    suspend fun fetchRemoteModelCatalog(): String? {
+        return try {
+            val response = client.get("https://models.router-for.me/models.json")
+            val body = response.bodyAsText()
+            body.takeIf { response.status.isSuccess() && it.contains("\"id\"") }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private suspend fun parseResponse(response: HttpResponse, action: String): JsonObject {
         val text = response.bodyAsText()
         val obj = try { json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }

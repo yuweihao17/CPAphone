@@ -209,6 +209,13 @@ class OAuthLoginManager(
         credentialRepository.saveCredential(credential, tokens.accessToken)
         tokens.refreshToken?.let { credentialRepository.saveRefreshToken(id, it) }
         sessionManager.completeSession(state, alias, email)
+
+        // 登录成功后异步热更新模型目录（对齐 CLIProxyAPI model_updater：失败静默回退内嵌目录）
+        backgroundScope.launch {
+            tokenClient.fetchRemoteModelCatalog()?.let { json ->
+                com.cpaphone.core.model.ModelCatalog.applyRemoteCatalog(json)
+            }
+        }
     }
 
     /** 与 UI 层预设一致的服务商别名前缀 */
