@@ -2,6 +2,7 @@ package com.cpaphone.data.local.dao
 
 import androidx.room.*
 import com.cpaphone.core.model.CredentialStatus
+import com.cpaphone.core.model.ProviderType
 import com.cpaphone.data.local.entity.CredentialEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -9,6 +10,9 @@ import kotlinx.coroutines.flow.Flow
 interface CredentialDao {
     @Query("SELECT * FROM credentials ORDER BY createdAt DESC")
     fun getAllFlow(): Flow<List<CredentialEntity>>
+
+    @Query("SELECT * FROM credentials WHERE provider = :provider ORDER BY weight DESC")
+    fun getByProviderFlow(provider: ProviderType): Flow<List<CredentialEntity>>
 
     @Query("SELECT * FROM credentials")
     suspend fun getAll(): List<CredentialEntity>
@@ -24,6 +28,15 @@ interface CredentialDao {
 
     @Query("UPDATE credentials SET status = :status, statusMessage = :message WHERE id = :id")
     suspend fun updateStatus(id: String, status: CredentialStatus, message: String)
+
+    @Query("UPDATE credentials SET cooldownUntilTimestamp = :timestamp WHERE id = :id")
+    suspend fun updateGlobalCooldown(id: String, timestamp: Long)
+
+    @Query("UPDATE credentials SET modelCooldownsJson = :modelCooldownsJson WHERE id = :id")
+    suspend fun updateModelCooldowns(id: String, modelCooldownsJson: String)
+
+    @Query("UPDATE credentials SET expiresAt = :expiresAt WHERE id = :id")
+    suspend fun updateExpiresAt(id: String, expiresAt: Long)
 
     @Query("UPDATE credentials SET totalRequests = totalRequests + 1, successfulRequests = successfulRequests + :successIncrement WHERE id = :id")
     suspend fun recordRequestMetrics(id: String, successIncrement: Int)

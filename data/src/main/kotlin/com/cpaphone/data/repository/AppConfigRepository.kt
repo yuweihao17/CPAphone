@@ -24,6 +24,9 @@ data class AppConfig(
     val allowLanAccess: Boolean = false,
     val routingStrategy: RoutingStrategyType = RoutingStrategyType.WEIGHTED_ROUND_ROBIN,
     val safeModeEnabled: Boolean = true,
+    val enableCloaking: Boolean = true,          // 客户端指纹伪装与请求披风开关
+    val connectTimeoutMs: Long = 15_000L,        // 上游连接超时 (毫秒)
+    val requestTimeoutMs: Long = 120_000L,       // 上游总请求超时 (毫秒)
     val outboundProxyUrl: String? = null,
     val remoteHostUrl: String = "http://192.168.1.100:8317",
     val remoteSecretKey: String = "",
@@ -39,6 +42,9 @@ class AppConfigRepository(private val context: Context) {
         val ALLOW_LAN_ACCESS = booleanPreferencesKey("allow_lan_access")
         val ROUTING_STRATEGY = stringPreferencesKey("routing_strategy")
         val SAFE_MODE_ENABLED = booleanPreferencesKey("safe_mode_enabled")
+        val ENABLE_CLOAKING = booleanPreferencesKey("enable_cloaking")
+        val CONNECT_TIMEOUT_MS = longPreferencesKey("connect_timeout_ms")
+        val REQUEST_TIMEOUT_MS = longPreferencesKey("request_timeout_ms")
         val OUTBOUND_PROXY_URL = stringPreferencesKey("outbound_proxy_url")
         val REMOTE_HOST_URL = stringPreferencesKey("remote_host_url")
         val REMOTE_SECRET_KEY = stringPreferencesKey("remote_secret_key")
@@ -57,6 +63,9 @@ class AppConfigRepository(private val context: Context) {
                 try { RoutingStrategyType.valueOf(it) } catch (_: Exception) { RoutingStrategyType.WEIGHTED_ROUND_ROBIN }
             } ?: RoutingStrategyType.WEIGHTED_ROUND_ROBIN,
             safeModeEnabled = prefs[PreferencesKeys.SAFE_MODE_ENABLED] ?: true,
+            enableCloaking = prefs[PreferencesKeys.ENABLE_CLOAKING] ?: true,
+            connectTimeoutMs = prefs[PreferencesKeys.CONNECT_TIMEOUT_MS] ?: 15_000L,
+            requestTimeoutMs = prefs[PreferencesKeys.REQUEST_TIMEOUT_MS] ?: 120_000L,
             outboundProxyUrl = prefs[PreferencesKeys.OUTBOUND_PROXY_URL],
             remoteHostUrl = prefs[PreferencesKeys.REMOTE_HOST_URL] ?: "http://192.168.1.100:8317",
             remoteSecretKey = prefs[PreferencesKeys.REMOTE_SECRET_KEY] ?: "",
@@ -83,6 +92,17 @@ class AppConfigRepository(private val context: Context) {
 
     suspend fun updateSafeMode(enabled: Boolean) {
         context.dataStore.edit { it[PreferencesKeys.SAFE_MODE_ENABLED] = enabled }
+    }
+
+    suspend fun updateCloaking(enabled: Boolean) {
+        context.dataStore.edit { it[PreferencesKeys.ENABLE_CLOAKING] = enabled }
+    }
+
+    suspend fun updateTimeouts(connectTimeoutMs: Long, requestTimeoutMs: Long) {
+        context.dataStore.edit {
+            it[PreferencesKeys.CONNECT_TIMEOUT_MS] = connectTimeoutMs
+            it[PreferencesKeys.REQUEST_TIMEOUT_MS] = requestTimeoutMs
+        }
     }
 
     suspend fun updateOutboundProxy(url: String?) {

@@ -8,7 +8,7 @@ import androidx.security.crypto.MasterKey
 /**
  * 硬件级加密凭据保险箱 (Secure Vault)
  * 利用 Android Keystore 硬件 TEE/StrongBox 生成主密钥，
- * 使用 AES-256-GCM 保护 OAuth Token、Refresh Token 与原生 API Key。
+ * 使用 AES-256-GCM 保护 OAuth Token、Refresh Token、GCP 服务账号 JSON 与原生 API Key。
  */
 class SecureCredentialStorage(context: Context) {
 
@@ -39,6 +39,13 @@ class SecureCredentialStorage(context: Context) {
     }
 
     /**
+     * 检查是否存在敏感密钥
+     */
+    fun hasSecret(credentialId: String): Boolean {
+        return securePrefs.contains("secret_$credentialId")
+    }
+
+    /**
      * 保存 OAuth 刷新令牌 (Refresh Token)
      */
     fun saveRefreshToken(credentialId: String, refreshToken: String) {
@@ -53,12 +60,27 @@ class SecureCredentialStorage(context: Context) {
     }
 
     /**
-     * 清理凭据敏感信息
+     * 保存 GCP Vertex AI 或云服务账号 JSON 凭据字符串
+     */
+    fun saveServiceAccountJson(credentialId: String, serviceAccountJson: String) {
+        securePrefs.edit().putString("sa_$credentialId", serviceAccountJson).apply()
+    }
+
+    /**
+     * 读取 GCP Vertex AI 服务账号 JSON
+     */
+    fun getServiceAccountJson(credentialId: String): String? {
+        return securePrefs.getString("sa_$credentialId", null)
+    }
+
+    /**
+     * 清理凭据的所有敏感信息
      */
     fun deleteSecrets(credentialId: String) {
         securePrefs.edit()
             .remove("secret_$credentialId")
             .remove("refresh_$credentialId")
+            .remove("sa_$credentialId")
             .apply()
     }
 
