@@ -67,3 +67,5 @@ Thumbs.db
 # Backup files
 *.bak
 *~
+
+.trae/

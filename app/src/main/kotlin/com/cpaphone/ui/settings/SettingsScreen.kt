@@ -145,7 +145,15 @@ fun SettingsScreen() {
                     Switch(
                         checked = config?.allowLanAccess == true,
                         onCheckedChange = { allow ->
-                            scope.launch { app.appConfigRepository.updateAllowLanAccess(allow) }
+                            scope.launch {
+                                app.appConfigRepository.updateAllowLanAccess(allow)
+                                // 服务运行中时切换局域网开关需立即重绑新地址（127.0.0.1 ↔ 0.0.0.0）
+                                if (app.localProxyServer.isServerRunning()) {
+                                    app.localProxyServer.stop()
+                                    app.localProxyServer.start(config?.localPort ?: 8317, allow)
+                                }
+                                Toast.makeText(context, if (allow) "已开启局域网接入，服务已重绑 0.0.0.0" else "已关闭局域网接入，服务已重绑本机回环", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     )
                 }
