@@ -241,12 +241,10 @@ fun SettingsScreen() {
                             onClick = {
                                 isCheckingLocal = true
                                 scope.launch {
-                                    val running = app.localProxyServer.isServerRunning()
-                                    Toast.makeText(
-                                        context,
-                                        if (running) "本地网关运行正常 (:${config?.localPort ?: 8317})" else "本地网关未启动，请先在运行仪表盘启动服务",
-                                        Toast.LENGTH_LONG
-                                    ).show()
+                                    val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        probeLocalGateway(config?.localPort ?: 8317)
+                                    }
+                                    Toast.makeText(context, result, Toast.LENGTH_LONG).show()
                                     isCheckingLocal = false
                                 }
                             },
@@ -388,5 +386,37 @@ fun SettingsScreen() {
 
     if (showPluginManager) {
         PluginManagerSheet(onDismiss = { showPluginManager = false })
+    }
+}
+
+/**
+ * 本地网关真实探测：对 127.0.0.1:port/healthz 发起真实 HTTP 请求。
+ *
+ * 使用 HttpURLConnection 并显式绕过代理（Proxy.NO_PROXY），确保走本机回环，
+ * 可与"外部客户端经 VPN/TUN 劫持"的场景区分开：
+ * - 这里成功而外部客户端失败 → 外部请求被 VPN/代理劫持，请用局域网 IP 并在代理软件绕过
+ * - 这里失败 → 服务确未监听（绑定异常）
+ */
+private fun probeLocalGateway(port: Int): String {
+    if (!CpaApplication.instance.localProxyServer.isServerRunning()) {
+        return "未启动：请先在运行仪表盘启动服务"
+    }
+    val connection = try {
+        java.net.URL("http://127.0.0.1:$port/healthz").openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
+    } catch (_: Exception) {
+        return "本机回环访问失败: URL 构造异常"
+    }
+    return try {
+        connection.connectTimeout = 5000
+        connection.readTimeout = 5000
+        connection.requestMethod = "GET"
+        val start = System.currentTimeMillis()
+        val status = connection.responseCode
+        val elapsed = System.currentTimeMillis() - start
+        if (status == 200) "网关真实可达 (HTTP 200, ${elapsed}ms) — 服务正常监听中" else "异常响应: HTTP $status"
+    } catch (e: Exception) {
+        "本机回环访问失败: ${e.message?.take(120)}"
+    } finally {
+        connection.disconnect()
     }
 }
