@@ -111,10 +111,23 @@ object ProtocolTranslatorEngine {
             }
         }
 
+        // 解析工具定义（function calling）：tools[].function.{name,description,parameters}
+        val tools = root["tools"]?.jsonArray?.mapNotNull { toolElem ->
+            val toolObj = toolElem.jsonObject
+            val fn = toolObj["function"]?.jsonObject ?: return@mapNotNull null
+            val name = fn["name"]?.jsonPrimitive?.content ?: return@mapNotNull null
+            UnifiedToolDefinition(
+                name = name,
+                description = fn["description"]?.jsonPrimitive?.content ?: "",
+                parametersSchemaJson = fn["parameters"] ?: buildJsonObject { }
+            )
+        } ?: emptyList()
+
         return UnifiedChatRequest(
             model = model,
             messages = messages,
             systemPrompt = systemPrompt,
+            tools = tools,
             temperature = temperature,
             topP = topP,
             maxTokens = maxTokens,
@@ -196,10 +209,22 @@ object ProtocolTranslatorEngine {
             messages.add(UnifiedMessage(role, parts))
         }
 
+        // 解析工具定义（function calling）：tools[].{name,description,input_schema}
+        val tools = root["tools"]?.jsonArray?.mapNotNull { toolElem ->
+            val toolObj = toolElem.jsonObject
+            val name = toolObj["name"]?.jsonPrimitive?.content ?: return@mapNotNull null
+            UnifiedToolDefinition(
+                name = name,
+                description = toolObj["description"]?.jsonPrimitive?.content ?: "",
+                parametersSchemaJson = toolObj["input_schema"] ?: buildJsonObject { }
+            )
+        } ?: emptyList()
+
         return UnifiedChatRequest(
             model = model,
             messages = messages,
             systemPrompt = systemPrompt,
+            tools = tools,
             temperature = temperature,
             topP = topP,
             maxTokens = maxTokens,

@@ -258,7 +258,6 @@ class LocalProxyServer(
             )
 
             if (parsedRequest.isStreaming) {
-                call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
                 call.respondText(
                     antigravityClient.toOpenAiStreamSse(inference, parsedRequest.model),
                     ContentType.Text.EventStream
