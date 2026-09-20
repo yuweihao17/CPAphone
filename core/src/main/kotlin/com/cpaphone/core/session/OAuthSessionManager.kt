@@ -51,17 +51,20 @@ class OAuthSessionManager {
     val sessionsFlow: StateFlow<List<OAuthSession>> = _sessionsFlow.asStateFlow()
 
     /**
-     * 发起 CODE 流会话（PKCE 或 client_secret），生成可用的浏览器授权 URL
+     * 发起 CODE 流会话：CODE_PKCE 生成 verifier 并派发 code_challenge；
+     * CODE_SECRET 不生成 verifier（如 Antigravity，Google 明确要求不带 code_verifier）
      */
     fun startSession(provider: ProviderType, spec: OAuthProviderSpec): OAuthSession {
         cleanExpired()
         val state = generateOAuthState()
-        val url: String? = if (spec.flowKind == OAuthFlowKind.CODE_PKCE || spec.flowKind == OAuthFlowKind.CODE_SECRET) {
-            val verifier = Pkce.generateVerifier()
-            verifiers[state] = verifier
-            buildAuthorizeUrl(provider, spec, state, verifier)
-        } else {
-            null
+        val url: String? = when (spec.flowKind) {
+            OAuthFlowKind.CODE_PKCE -> {
+                val verifier = Pkce.generateVerifier()
+                verifiers[state] = verifier
+                buildAuthorizeUrl(provider, spec, state, verifier)
+            }
+            OAuthFlowKind.CODE_SECRET -> buildAuthorizeUrl(provider, spec, state, null)
+            else -> null
         }
         val session = OAuthSession(
             state = state,

@@ -94,7 +94,11 @@ class OAuthTokenClient(
                     add("code=${enc(code)}")
                     spec.redirectUri?.let { add("redirect_uri=${enc(it)}") }
                     add("client_id=${enc(spec.clientId)}")
-                    verifier?.let { add("code_verifier=${enc(it)}") }
+                    // 仅 PKCE 流携带 code_verifier；secret 流（Antigravity）带上会被拒绝：
+                    // invalid_grant "code_verifier or verifier is not needed"
+                    if (spec.flowKind == com.cpaphone.core.oauth.OAuthFlowKind.CODE_PKCE) {
+                        verifier?.let { add("code_verifier=${enc(it)}") }
+                    }
                     spec.clientSecret?.let { add("client_secret=${enc(it)}") }
                 }.joinToString("&")
                 client.post(spec.tokenUrl) {
