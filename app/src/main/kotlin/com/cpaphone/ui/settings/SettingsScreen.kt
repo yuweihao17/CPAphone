@@ -30,6 +30,7 @@ fun SettingsScreen() {
     var remoteHostInput by remember(config?.remoteHostUrl) { mutableStateOf(config?.remoteHostUrl ?: "http://192.168.1.100:8317") }
     var remoteSecretInput by remember(config?.remoteSecretKey) { mutableStateOf(config?.remoteSecretKey ?: "") }
     var isTestingRemote by remember { mutableStateOf(false) }
+    var showPluginManager by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -278,5 +279,34 @@ fun SettingsScreen() {
                 }
             }
         }
+
+        // 动态插件中心入口卡片
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(text = "动态扩展插件 (C-ABI NDK)", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(text = "加载与管理 .so 原生插件与自定义 Provider", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+
+                FilledTonalButton(onClick = { showPluginManager = true }) {
+                    Text("管理插件")
+                }
+            }
+        }
+    }
+
+    if (showPluginManager) {
+        PluginManagerSheet(onDismiss = { showPluginManager = false })
     }
 }
