@@ -11,6 +11,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.CoroutineScope
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -153,7 +154,7 @@ class UpstreamHttpClient(
      * 若正常，则返回拼接好的 ByteReadChannel 供下游零拷贝管道消费。
      */
     private suspend fun inspectStreamBootstrap(channel: ByteReadChannel): Pair<ByteReadChannel, String?> {
-        val firstLine = channel.readUTF8Line(maxSize = 4096) ?: return Pair(channel, null)
+        val firstLine = channel.readUTF8Line(4096) ?: return Pair(channel, null)
         val lower = firstLine.lowercase()
 
         val isHiddenError = lower.contains("server_is_overloaded") ||
