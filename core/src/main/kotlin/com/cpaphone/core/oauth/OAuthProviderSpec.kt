@@ -98,7 +98,7 @@ val PROVIDER_SPECS: Map<ProviderType, OAuthProviderSpec> = mapOf(
 )
 
 /**
- * PKCE 工具（RFC 7636），verifier 与 challenge 生成规则对齐 CLIProxyAPI internal/auth/*/pkce.go
+ * PKCE 工具（RFC 7636），verifier 与 challenge 生成规则对齐 CLIProxyAPI internal/auth 认证器
  */
 object Pkce {
     private val random = SecureRandom()
