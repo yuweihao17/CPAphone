@@ -167,29 +167,40 @@ class LocalProxyServer(
         engine.start(wait = false)
         server = engine
 
-        // 绑定验证：Ktor CIO 的绑定在后台协程中异步执行且失败静默（本机已实证），
-        // 这里探测本机回环端口直至可达，确保服务真实监听后再宣告运行
-        var verified = false
-        repeat(30) {
-            if (isTcpReachable("127.0.0.1", port)) {
-                verified = true
-                return@repeat
+        // 绑定验证：Ktor CIO 的绑定在后台协程中异步执行且失败静默（本机已实证）。
+        // 探测含 TCP 连接，必须运行在 IO 线程——主线程执行会抛 NetworkOnMainThreadException 导致闪退
+        val verifyScope = serverScope
+        if (verifyScope == null) {
+            isRunning.set(true)
+            stateListener?.onStateChanged(true, host, port)
+            return
+        }
+        verifyScope.launch {
+            var verified = false
+            repeat(30) {
+                if (isTcpReachable("127.0.0.1", port)) {
+                    verified = true
+                    return@repeat
+                }
+                kotlinx.coroutines.delay(100)
             }
-            Thread.sleep(100)
+            if (!verified) {
+                engine.stop(0, 500)
+                if (server === engine) server = null
+                isRunning.set(false)
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    stateListener?.onStateChanged(false, host, port)
+                }
+            } else {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    stateListener?.onStateChanged(true, host, port)
+                }
+            }
         }
-        if (!verified) {
-            engine.stop(0, 500)
-            server = null
-            isRunning.set(false)
-            stateListener?.onStateChanged(false, host, port)
-            throw IllegalStateException("代理服务绑定失败：端口 $port 无法监听（可能被其他应用占用）")
-        }
-
         isRunning.set(true)
-        stateListener?.onStateChanged(true, host, port)
     }
 
-    /** 探测 TCP 端口是否可达（500ms 连接超时） */
+    /** 探测 TCP 端口是否可达（500ms 连接超时）；仅可在非主线程调用 */
     private fun isTcpReachable(host: String, port: Int): Boolean = try {
         java.net.Socket().use { socket ->
             socket.connect(java.net.InetSocketAddress(host, port), 500)

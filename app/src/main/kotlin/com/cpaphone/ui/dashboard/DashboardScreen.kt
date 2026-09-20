@@ -99,10 +99,14 @@ fun DashboardScreen() {
                                 toggleService(context, false)
                                 isRunning = false
                             } else {
-                                val port = config?.localPort ?: 8317
-                                app.localProxyServer.start(port, config?.allowLanAccess ?: false)
-                                toggleService(context, true)
-                                isRunning = true
+                                try {
+                                    val port = config?.localPort ?: 8317
+                                    app.localProxyServer.start(port, config?.allowLanAccess ?: false)
+                                    toggleService(context, true)
+                                    isRunning = true
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "启动失败：${e.message}", Toast.LENGTH_LONG).show()
+                                }
                             }
                         }
                     ) {
