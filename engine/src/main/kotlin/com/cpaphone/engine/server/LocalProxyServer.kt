@@ -1,5 +1,6 @@
 package com.cpaphone.engine.server
 
+import com.cpaphone.core.model.ClientSecretRequest
 import com.cpaphone.core.model.ProviderType
 import com.cpaphone.core.translator.ProtocolTranslatorEngine
 import com.cpaphone.core.translator.StreamChunkTranslator
@@ -8,6 +9,7 @@ import com.cpaphone.data.local.entity.TraceLogEntity
 import com.cpaphone.engine.client.UpstreamCallResult
 import com.cpaphone.engine.client.UpstreamHttpClient
 import com.cpaphone.engine.coordinator.CredentialCoordinator
+import com.cpaphone.engine.realtime.RealtimeRelayManager
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.cio.*
@@ -41,7 +43,8 @@ interface ProxyServerStateListener {
 class LocalProxyServer(
     private val coordinator: CredentialCoordinator,
     private val traceLogDao: TraceLogDao,
-    private val upstreamClient: UpstreamHttpClient = UpstreamHttpClient()
+    private val upstreamClient: UpstreamHttpClient = UpstreamHttpClient(),
+    val realtimeRelayManager: RealtimeRelayManager = RealtimeRelayManager(coordinator)
 ) {
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private val isRunning = AtomicBoolean(false)
@@ -119,6 +122,28 @@ class LocalProxyServer(
                         return@post
                     }
                     handleChatCompletions(call, inboundProtocol = "gemini")
+                }
+
+                // =========================================================================
+                // WebRTC / Realtime 语音通信路由 (对齐 CLIProxyAPI /v1/realtime)
+                // =========================================================================
+
+                // 签发临时客户端凭据 (Client Secret ek_...)
+                post("/v1/realtime/client_secrets") {
+                    handleCreateClientSecret(call)
+                }
+
+                // 发起 WebRTC 通话 (SDP 协商)
+                post("/v1/realtime/calls") {
+                    handleRealtimeCallOffer(call)
+                }
+                post("/v1/live") {
+                    handleRealtimeCallOffer(call)
+                }
+
+                // 挂断 WebRTC 通话
+                post("/v1/realtime/calls/{call_id}/hangup") {
+                    handleHangupCall(call)
                 }
             }
         }
@@ -334,6 +359,65 @@ class LocalProxyServer(
                     errorMessage = "All credentials exhausted"
                 )
             }
+        }
+    }
+
+    private suspend fun handleCreateClientSecret(call: ApplicationCall) {
+        val rawBody = call.receiveText()
+        val request = try {
+            kotlinx.serialization.json.Json.decodeFromString<ClientSecretRequest>(rawBody)
+        } catch (_: Exception) {
+            ClientSecretRequest()
+        }
+        val response = realtimeRelayManager.createClientSecret(request)
+        val jsonPayload = buildJsonObject {
+            put("value", response.value)
+            put("expires_at", response.expiresAt)
+            putJsonObject("session") {
+                put("id", response.sessionId)
+                put("object", "realtime.session")
+                put("model", request.model)
+                put("voice", request.voice)
+            }
+        }.toString()
+        call.respondText(jsonPayload, ContentType.Application.Json, HttpStatusCode.OK)
+    }
+
+    private suspend fun handleRealtimeCallOffer(call: ApplicationCall) {
+        val callId = "call_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16)
+        val sdpOffer = call.receiveText()
+
+        // 调度支持实时语音的凭据 (优先 Codex / GPT-4o-Realtime)
+        val acquired = coordinator.acquireCredential("gpt-4o-realtime-preview")
+        if (acquired == null) {
+            call.respond(
+                HttpStatusCode.ServiceUnavailable,
+                "{\"error\":{\"message\":\"No available credential in pool supporting Realtime WebRTC\",\"type\":\"pool_exhausted\"}}"
+            )
+            return
+        }
+
+        val (credential, _) = acquired
+        realtimeRelayManager.registerSession(
+            callId = callId,
+            credential = credential,
+            model = "gpt-4o-realtime-preview"
+        )
+
+        // 生成标准 WebRTC SDP Answer，并下发 Location 指针头供信令绑定
+        val sdpAnswer = realtimeRelayManager.generateSyntheticSdpAnswer(sdpOffer)
+        call.response.headers.append("Location", "/v1/realtime/calls/$callId")
+        call.response.headers.append("Access-Control-Expose-Headers", "Location")
+        call.respondText(sdpAnswer, ContentType.parse("application/sdp"), HttpStatusCode.Created)
+    }
+
+    private suspend fun handleHangupCall(call: ApplicationCall) {
+        val callId = call.parameters["call_id"] ?: ""
+        val success = realtimeRelayManager.hangup(callId)
+        if (success) {
+            call.respondText("{\"status\":\"hung_up\",\"call_id\":\"$callId\"}", ContentType.Application.Json, HttpStatusCode.OK)
+        } else {
+            call.respondText("{\"error\":{\"message\":\"Call ID not found or already closed\",\"type\":\"not_found\"}}", ContentType.Application.Json, HttpStatusCode.NotFound)
         }
     }
 

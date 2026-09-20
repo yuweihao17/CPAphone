@@ -48,6 +48,7 @@ fun PlaygroundScreen() {
     )
     var selectedModel by remember { mutableStateOf(presetModels[0]) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
+    var showVoiceConsole by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     Column(
@@ -67,39 +68,54 @@ fun PlaygroundScreen() {
                 color = MaterialTheme.colorScheme.onBackground
             )
 
-            // 模型切换下拉框
-            Box {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.clickable { modelMenuExpanded = true }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 实时语音通话入口按键
+                FilledTonalIconButton(
+                    onClick = { showVoiceConsole = true },
+                    modifier = Modifier.size(36.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = selectedModel.take(18) + if (selectedModel.length > 18) "..." else "",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Icon(Icons.Default.ArrowDropDown, contentDescription = "切换模型", modifier = Modifier.size(16.dp))
-                    }
+                    Icon(
+                        Icons.Default.GraphicEq,
+                        contentDescription = "实时语音",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
 
-                DropdownMenu(
-                    expanded = modelMenuExpanded,
-                    onDismissRequest = { modelMenuExpanded = false }
-                ) {
-                    presetModels.forEach { model ->
-                        DropdownMenuItem(
-                            text = { Text(model, fontSize = 13.sp) },
-                            onClick = {
-                                selectedModel = model
-                                modelMenuExpanded = false
-                            }
-                        )
+                // 模型切换下拉框
+                Box {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.clickable { modelMenuExpanded = true }
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = selectedModel.take(14) + if (selectedModel.length > 14) "..." else "",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = "切换模型", modifier = Modifier.size(16.dp))
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = modelMenuExpanded,
+                        onDismissRequest = { modelMenuExpanded = false }
+                    ) {
+                        presetModels.forEach { model ->
+                            DropdownMenuItem(
+                                text = { Text(model, fontSize = 13.sp) },
+                                onClick = {
+                                    selectedModel = model
+                                    modelMenuExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -201,6 +217,12 @@ fun PlaygroundScreen() {
                 Icon(Icons.Default.Send, contentDescription = "发送", tint = MaterialTheme.colorScheme.primary)
             }
         }
+    }
+
+    if (showVoiceConsole) {
+        RealtimeVoiceConsoleSheet(
+            onDismiss = { showVoiceConsole = false }
+        )
     }
 }
 
