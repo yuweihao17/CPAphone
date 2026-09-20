@@ -58,8 +58,9 @@ class AntigravityClient {
     private val projectCache = HashMap<String, String>()
 
     private companion object {
-        const val PROD_BASE = "https://cloudcode-pa.googleapis.com"
-        const val DAILY_BASE = "https://daily-cloudcode-pa.googleapis.com"
+        // 推理走 daily 端点（对齐 CLIProxyAPI 消费者凭据默认行为，prod 为企业/内部分发）
+        const val INFERENCE_BASE = "https://daily-cloudcode-pa.googleapis.com"
+        const val ASSIST_BASE = "https://cloudcode-pa.googleapis.com"
         const val USER_AGENT = "antigravity/hub/2.9.1 darwin/arm64"
     }
 
@@ -72,7 +73,7 @@ class AntigravityClient {
         }
 
         val assist = try {
-            val response = client.post("$PROD_BASE/v1internal:loadCodeAssist") {
+            val response = client.post("$ASSIST_BASE/v1internal:loadCodeAssist") {
                 header(HttpHeaders.Authorization, "Bearer $accessToken")
                 header(HttpHeaders.UserAgent, USER_AGENT)
                 contentType(ContentType.Application.Json)
@@ -91,7 +92,7 @@ class AntigravityClient {
         // loadCodeAssist 未携带 project：onboardUser 轮询注册（最多 5 次 × 2s）
         repeat(5) {
             val onboard = try {
-                val response = client.post("$DAILY_BASE/v1internal:onboardUser") {
+                val response = client.post("$INFERENCE_BASE/v1internal:onboardUser") {
                     header(HttpHeaders.Authorization, "Bearer $accessToken")
                     header(HttpHeaders.UserAgent, USER_AGENT)
                     header("X-Goog-Api-Client", "gl-node/22.21.1")
@@ -143,7 +144,7 @@ class AntigravityClient {
             }
         }
 
-        val response = client.post("$PROD_BASE/v1internal:generateContent") {
+        val response = client.post("$INFERENCE_BASE/v1internal:generateContent") {
             header(HttpHeaders.Authorization, "Bearer $accessToken")
             header(HttpHeaders.UserAgent, USER_AGENT)
             contentType(ContentType.Application.Json)
