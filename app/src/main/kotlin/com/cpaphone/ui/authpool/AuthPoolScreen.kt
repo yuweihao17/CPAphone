@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -15,6 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -35,23 +37,36 @@ import com.cpaphone.ui.theme.AccentWarning
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+enum class AuthPoolSubTab(val title: String) {
+    CREDENTIALS("凭据治理"),
+    QUOTA("配额监控")
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AuthPoolScreen() {
     val context = LocalContext.current
     val app = CpaApplication.instance
     val credentials by app.credentialRepository.getAllCredentialsFlow().collectAsState(initial = emptyList())
+    val quotasMap by app.credentialRepository.getAllQuotasFlow().collectAsState(initial = emptyMap())
+    var currentSubTab by remember { mutableStateOf(AuthPoolSubTab.CREDENTIALS) }
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var manualPasteProvider by remember { mutableStateOf<ProviderType?>(null) }
 
+    val loadedQuotasCount = remember(credentials, quotasMap) {
+        credentials.count { quotasMap[it.id]?.groups?.isNotEmpty() == true }
+    }
+
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showAddDialog = true },
-                containerColor = MaterialTheme.colorScheme.primary
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "添加凭据")
+            if (currentSubTab == AuthPoolSubTab.CREDENTIALS) {
+                FloatingActionButton(
+                    onClick = { showAddDialog = true },
+                    containerColor = MaterialTheme.colorScheme.primary
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "添加凭据")
+                }
             }
         }
     ) { padding ->
@@ -68,7 +83,7 @@ fun AuthPoolScreen() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "凭据池治理",
+                    text = "凭据与配额",
                     fontSize = 26.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground
@@ -81,96 +96,140 @@ fun AuthPoolScreen() {
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // —— OAuth 快捷登录区块（对齐 CLIProxyAPI 管理控制台） ——
-            val oauthSessions by app.oauthLoginManager.sessionsFlow.collectAsState()
-            val consumedResults = remember { mutableStateOf(mutableSetOf<String>()) }
-            LaunchedEffect(oauthSessions) {
-                oauthSessions.forEach { session ->
-                    val consumed = when (session.status) {
-                        OAuthFlowStatus.OK -> consumedResults.value.add(session.state)
-                        OAuthFlowStatus.ERROR -> consumedResults.value.add(session.state)
-                        else -> false
+            // —— 极简动感双模切换条 (Segmented Pill Switcher) ——
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                AuthPoolSubTab.entries.forEach { subTab ->
+                    val selected = currentSubTab == subTab
+                    val labelText = when (subTab) {
+                        AuthPoolSubTab.CREDENTIALS -> "凭据治理 (${credentials.size})"
+                        AuthPoolSubTab.QUOTA -> "配额监控 ($loadedQuotasCount/${credentials.size})"
                     }
-                    if (consumed) {
-                        val message = when (session.status) {
-                            OAuthFlowStatus.OK -> "登录成功：${session.resultAlias ?: session.provider.displayName}"
-                            else -> "登录失败：${session.errorMessage ?: "未知错误"}"
-                        }
-                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
+                            )
+                            .clickable { currentSubTab = subTab }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = labelText,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
                     }
                 }
             }
 
-            Text(
-                text = "OAuth 快捷登录",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            OAUTH_LOGIN_CARDS.forEach { card ->
-                val related = oauthSessions.filter { it.provider == card.provider }
-                val activeSession = related.firstOrNull { it.status == OAuthFlowStatus.WAIT }
-                val lastResult = related.firstOrNull { it.status != OAuthFlowStatus.WAIT }
-                OAuthLoginCardItem(
-                    card = card,
-                    activeSession = activeSession,
-                    lastResult = lastResult,
-                    onStart = {
-                        scope.launch {
-                            try {
-                                val result = app.oauthLoginManager.startLogin(card.provider)
-                                result.authorizeUrl?.let { url ->
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                                    Toast.makeText(context, "已打开授权页面，请在浏览器中完成登录", Toast.LENGTH_SHORT).show()
-                                }
-                                // 设备码流在卡片内展示 user_code，无需跳转
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "发起登录失败：${e.message}", Toast.LENGTH_LONG).show()
-                            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (currentSubTab == AuthPoolSubTab.QUOTA) {
+                // —— 配额监控大盘视图 ——
+                QuotaManagementView(credentials = credentials)
+            } else {
+                // —— 凭据治理视图 ——
+                // OAuth 快捷登录区块（对齐 CLIProxyAPI 管理控制台）
+                val oauthSessions by app.oauthLoginManager.sessionsFlow.collectAsState()
+                val consumedResults = remember { mutableStateOf(mutableSetOf<String>()) }
+                LaunchedEffect(oauthSessions) {
+                    oauthSessions.forEach { session ->
+                        val consumed = when (session.status) {
+                            OAuthFlowStatus.OK -> consumedResults.value.add(session.state)
+                            OAuthFlowStatus.ERROR -> consumedResults.value.add(session.state)
+                            else -> false
                         }
-                    },
-                    onCancel = { app.oauthLoginManager.cancelLogin(activeSession?.state ?: "") },
-                    onManualPaste = { manualPasteProvider = card.provider }
+                        if (consumed) {
+                            val message = when (session.status) {
+                                OAuthFlowStatus.OK -> "登录成功：${session.resultAlias ?: session.provider.displayName}"
+                                else -> "登录失败：${session.errorMessage ?: "未知错误"}"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+
+                Text(
+                    text = "OAuth 快捷登录",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onBackground
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (credentials.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 48.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "暂无凭据，点击上方登录或右下角手动添加",
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                        fontSize = 14.sp
-                    )
-                }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    credentials.forEach { credential ->
-                        CredentialItemCard(
-                            credential = credential,
-                            onResetCooldown = {
-                                app.coordinator.cooldownManager.resetCooldown(credential.id)
-                                scope.launch {
-                                    app.credentialRepository.updateGlobalCooldown(credential.id, 0L)
-                                }
-                                Toast.makeText(context, "已重置 [${credential.alias}] 的冷却状态", Toast.LENGTH_SHORT).show()
-                            },
-                            onDelete = {
-                                scope.launch {
-                                    app.credentialRepository.deleteCredential(credential.id)
+                OAUTH_LOGIN_CARDS.forEach { card ->
+                    val related = oauthSessions.filter { it.provider == card.provider }
+                    val activeSession = related.firstOrNull { it.status == OAuthFlowStatus.WAIT }
+                    val lastResult = related.firstOrNull { it.status != OAuthFlowStatus.WAIT }
+                    OAuthLoginCardItem(
+                        card = card,
+                        activeSession = activeSession,
+                        lastResult = lastResult,
+                        onStart = {
+                            scope.launch {
+                                try {
+                                    val result = app.oauthLoginManager.startLogin(card.provider)
+                                    result.authorizeUrl?.let { url ->
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                        Toast.makeText(context, "已打开授权页面，请在浏览器中完成登录", Toast.LENGTH_SHORT).show()
+                                    }
+                                    // 设备码流在卡片内展示 user_code，无需跳转
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "发起登录失败：${e.message}", Toast.LENGTH_LONG).show()
                                 }
                             }
+                        },
+                        onCancel = { app.oauthLoginManager.cancelLogin(activeSession?.state ?: "") },
+                        onManualPaste = { manualPasteProvider = card.provider }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (credentials.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "暂无凭据，点击上方登录或右下角手动添加",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            fontSize = 14.sp
                         )
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        credentials.forEach { credential ->
+                            CredentialItemCard(
+                                credential = credential,
+                                onResetCooldown = {
+                                    app.coordinator.cooldownManager.resetCooldown(credential.id)
+                                    scope.launch {
+                                        app.credentialRepository.updateGlobalCooldown(credential.id, 0L)
+                                    }
+                                    Toast.makeText(context, "已重置 [${credential.alias}] 的冷却状态", Toast.LENGTH_SHORT).show()
+                                },
+                                onDelete = {
+                                    scope.launch {
+                                        app.credentialRepository.deleteCredential(credential.id)
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }

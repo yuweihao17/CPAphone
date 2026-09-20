@@ -42,6 +42,8 @@ class CpaApplication : Application() {
         private set
     lateinit var oauthLoginManager: OAuthLoginManager
         private set
+    lateinit var oauthQuotaEngine: com.cpaphone.engine.quota.OAuthQuotaEngine
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -49,11 +51,16 @@ class CpaApplication : Application() {
 
         database = CpaDatabase.getInstance(this)
         secureStorage = SecureCredentialStorage(this)
-        credentialRepository = CredentialRepository(database.credentialDao(), secureStorage)
+        credentialRepository = CredentialRepository(
+            dao = database.credentialDao(),
+            secureStorage = secureStorage,
+            quotaDao = database.credentialQuotaDao()
+        )
         appConfigRepository = AppConfigRepository(this)
 
         oauthSessionManager = OAuthSessionManager()
         oauthLoginManager = OAuthLoginManager(oauthSessionManager, credentialRepository)
+        oauthQuotaEngine = com.cpaphone.engine.quota.OAuthQuotaEngine()
         coordinator = CredentialCoordinator(credentialRepository, oauthLoginManager)
         localProxyServer = LocalProxyServer(
             coordinator = coordinator,

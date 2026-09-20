@@ -1,21 +1,86 @@
 package com.cpaphone.data.repository
 
 import com.cpaphone.core.model.AuthCredential
+import com.cpaphone.core.model.CredentialQuota
 import com.cpaphone.core.model.CredentialStatus
 import com.cpaphone.core.model.ProviderType
+import com.cpaphone.core.model.QuotaGroup
 import com.cpaphone.data.local.dao.CredentialDao
+import com.cpaphone.data.local.dao.CredentialQuotaDao
 import com.cpaphone.data.local.entity.CredentialEntity
+import com.cpaphone.data.local.entity.CredentialQuotaEntity
 import com.cpaphone.data.security.SecureCredentialStorage
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 open class CredentialRepository(
     private val dao: CredentialDao,
-    private val secureStorage: SecureCredentialStorage
+    private val secureStorage: SecureCredentialStorage,
+    private val quotaDao: CredentialQuotaDao? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+
+    // =========================================================================
+    // 配额持久化与 Flow 监听（支持本地秒开与离线展示）
+    // =========================================================================
+
+    open fun getAllQuotasFlow(): Flow<Map<String, CredentialQuota>> {
+        val qDao = quotaDao ?: return flowOf(emptyMap())
+        return qDao.getAllFlow().map { entities ->
+            entities.associate { entity -> entity.credentialId to entity.toDomain() }
+        }
+    }
+
+    open fun getQuotaFlow(credentialId: String): Flow<CredentialQuota?> {
+        val qDao = quotaDao ?: return flowOf(null)
+        return qDao.getByIdFlow(credentialId).map { it?.toDomain() }
+    }
+
+    open suspend fun getQuotaById(credentialId: String): CredentialQuota? {
+        return quotaDao?.getById(credentialId)?.toDomain()
+    }
+
+    open suspend fun saveQuota(quota: CredentialQuota) {
+        quotaDao?.insertOrUpdate(quota.toEntity())
+    }
+
+    open suspend fun deleteQuota(credentialId: String) {
+        quotaDao?.deleteById(credentialId)
+    }
+
+    private fun CredentialQuotaEntity.toDomain(): CredentialQuota {
+        val groups = try {
+            json.decodeFromString<List<QuotaGroup>>(groupsJson)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return CredentialQuota(
+            credentialId = credentialId,
+            provider = ProviderType.fromIdentifier(provider),
+            planType = planType,
+            resetCredits = resetCredits,
+            groups = groups,
+            statusMessage = statusMessage,
+            isSupported = isSupported,
+            updatedAt = updatedAt
+        )
+    }
+
+    private fun CredentialQuota.toEntity(): CredentialQuotaEntity {
+        return CredentialQuotaEntity(
+            credentialId = credentialId,
+            provider = provider.identifier,
+            planType = planType,
+            resetCredits = resetCredits,
+            groupsJson = json.encodeToString(groups),
+            statusMessage = statusMessage,
+            isSupported = isSupported,
+            updatedAt = updatedAt
+        )
+    }
 
     open fun getAllCredentialsFlow(): Flow<List<AuthCredential>> {
         return dao.getAllFlow().map { entities ->
