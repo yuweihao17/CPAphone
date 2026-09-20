@@ -3,6 +3,7 @@ name: Build Android APK
 on:
   push:
     branches: [ master, main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 jobs:
@@ -26,9 +27,23 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload Debug APK Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: CPAphone-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 14
+
+      # tag 推送（v*）时发布公开 Release，APK 附件无需登录即可下载
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk CPAphone-debug.apk
+          gh release create "${{ github.ref_name }}" \
+            CPAphone-debug.apk \
+            --title "CPAphone ${{ github.ref_name }}" \
+            --notes "Android 8.0+ 安装包，下载后直接安装。更多版本请查看 Releases 页面。" \
+            || gh release upload "${{ github.ref_name }}" \
+            CPAphone-debug.apk --clobber

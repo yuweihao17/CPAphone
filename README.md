@@ -5,8 +5,24 @@
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose%20(Material%203)-blue.svg)](https://developer.android.com/jetpack/compose)
 [![Network Engine](https://img.shields.io/badge/Engine-Ktor%203.1%20CIO-orange.svg)](https://ktor.io)
 [![Architecture](https://img.shields.io/badge/Architecture-Clean%20%2B%20MVI-red.svg)](docs/TECHNICAL_SPEC.md)
+[![Release](https://img.shields.io/github/v/release/yuweihao17/CPAphone?color=brightgreen&label=APK%20Download)](https://github.com/yuweihao17/CPAphone/releases/latest)
 
 **CPAphone** 是基于 [CLIProxyAPI](https://github.com/...) 深度重塑的现代化 Android 原生智能 AI 代理网关与中控管理平台。它将服务器级多模型路由调度、多账号池治理、全双工跨协议转译与思考链（Thinking）签名保真能力，完美浓缩至手机端轻量、丝滑、极低功耗的原生应用中。
+
+---
+
+## 📲 下载安装
+
+无需登录 GitHub，直接获取最新安装包：
+
+```bash
+# 命令行下载最新 APK
+curl -LO https://github.com/yuweihao17/CPAphone/releases/latest/download/CPAphone-debug.apk
+```
+
+- 📦 [**点此前往 Releases 页面下载**](https://github.com/yuweihao17/CPAphone/releases/latest)
+- 下载 `CPAphone-debug.apk` → 手机端安装 → 允许"未知来源应用"即可
+- 每次发布新版本（tag `v*`）都会由 CI 自动编译并附上安装包
 
 ---
 
