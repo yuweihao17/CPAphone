@@ -11,44 +11,44 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-class CredentialRepository(
+open class CredentialRepository(
     private val dao: CredentialDao,
     private val secureStorage: SecureCredentialStorage
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun getAllCredentialsFlow(): Flow<List<AuthCredential>> {
+    open fun getAllCredentialsFlow(): Flow<List<AuthCredential>> {
         return dao.getAllFlow().map { entities ->
             entities.map { it.toDomain() }
         }
     }
 
-    fun getCredentialsByProviderFlow(provider: ProviderType): Flow<List<AuthCredential>> {
+    open fun getCredentialsByProviderFlow(provider: ProviderType): Flow<List<AuthCredential>> {
         return dao.getByProviderFlow(provider).map { entities ->
             entities.map { it.toDomain() }
         }
     }
 
-    suspend fun getAllCredentials(): List<AuthCredential> {
+    open suspend fun getAllCredentials(): List<AuthCredential> {
         return dao.getAll().map { it.toDomain() }
     }
 
-    suspend fun getCredentialById(id: String): AuthCredential? {
+    open suspend fun getCredentialById(id: String): AuthCredential? {
         return dao.getById(id)?.toDomain()
     }
 
-    suspend fun saveCredential(credential: AuthCredential, secretKeyOrToken: String? = null) {
+    open suspend fun saveCredential(credential: AuthCredential, secretKeyOrToken: String? = null) {
         dao.insertOrUpdate(credential.toEntity())
         if (!secretKeyOrToken.isNullOrBlank()) {
             secureStorage.saveSecret(credential.id, secretKeyOrToken)
         }
     }
 
-    suspend fun saveCredentialsBatch(credentials: List<AuthCredential>) {
+    open suspend fun saveCredentialsBatch(credentials: List<AuthCredential>) {
         dao.insertAll(credentials.map { it.toEntity() })
     }
 
-    fun getSecretKey(credentialId: String): String? {
+    open fun getSecretKey(credentialId: String): String? {
         return secureStorage.getSecret(credentialId)
     }
 
@@ -62,15 +62,15 @@ class CredentialRepository(
         return secureStorage.getRefreshToken(credentialId)
     }
 
-    suspend fun updateStatus(id: String, status: CredentialStatus, message: String = "") {
+    open suspend fun updateStatus(id: String, status: CredentialStatus, message: String = "") {
         dao.updateStatus(id, status, message)
     }
 
-    suspend fun updateGlobalCooldown(id: String, timestamp: Long) {
+    open suspend fun updateGlobalCooldown(id: String, timestamp: Long) {
         dao.updateGlobalCooldown(id, timestamp)
     }
 
-    suspend fun updateModelCooldown(id: String, model: String, cooldownUntilTimestamp: Long) {
+    open suspend fun updateModelCooldown(id: String, model: String, cooldownUntilTimestamp: Long) {
         val existing = dao.getById(id) ?: return
         val currentMap = try {
             json.decodeFromString<Map<String, Long>>(existing.modelCooldownsJson).toMutableMap()
@@ -85,15 +85,15 @@ class CredentialRepository(
         dao.updateExpiresAt(id, expiresAt)
     }
 
-    suspend fun recordRequestMetrics(id: String, success: Boolean) {
+    open suspend fun recordRequestMetrics(id: String, success: Boolean) {
         dao.recordRequestMetrics(id, if (success) 1 else 0)
     }
 
-    suspend fun recordError(id: String, message: String) {
+    open suspend fun recordError(id: String, message: String) {
         dao.recordError(id, System.currentTimeMillis(), message)
     }
 
-    suspend fun deleteCredential(id: String) {
+    open suspend fun deleteCredential(id: String) {
         dao.deleteById(id)
         secureStorage.deleteSecrets(id)
     }

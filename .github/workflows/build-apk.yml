@@ -31,6 +31,9 @@ jobs:
       - name: Run Core Unit Tests
         run: ./gradlew :core:test --stacktrace
 
+      - name: Run Engine Unit Tests
+        run: ./gradlew :engine:testDebugUnitTest --stacktrace
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 

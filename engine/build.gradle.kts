@@ -46,3 +46,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test)
 }
+
+tasks.withType<Test> {
+    // OAuth 冒烟测试需实时打印授权 URL 与兑换结果
+    testLogging { showStandardStreams = true }
+}
