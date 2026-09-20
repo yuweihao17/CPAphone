@@ -1,12 +1,14 @@
 package com.cpaphone
 
 import android.app.Application
+import com.cpaphone.core.session.OAuthSessionManager
 import com.cpaphone.data.local.CpaDatabase
 import com.cpaphone.data.repository.AppConfigRepository
 import com.cpaphone.data.repository.CredentialRepository
 import com.cpaphone.data.security.SecureCredentialStorage
 import com.cpaphone.engine.coordinator.CredentialCoordinator
 import com.cpaphone.engine.discovery.NsdDiscoveryManager
+import com.cpaphone.engine.oauth.OAuthLoginManager
 import com.cpaphone.engine.plugin.NativePluginHost
 import com.cpaphone.engine.remote.RemoteManagementClient
 import com.cpaphone.engine.server.LocalProxyServer
@@ -35,6 +37,10 @@ class CpaApplication : Application() {
         private set
     lateinit var nativePluginHost: NativePluginHost
         private set
+    lateinit var oauthSessionManager: OAuthSessionManager
+        private set
+    lateinit var oauthLoginManager: OAuthLoginManager
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -45,11 +51,15 @@ class CpaApplication : Application() {
         credentialRepository = CredentialRepository(database.credentialDao(), secureStorage)
         appConfigRepository = AppConfigRepository(this)
 
-        coordinator = CredentialCoordinator(credentialRepository)
+        oauthSessionManager = OAuthSessionManager()
+        oauthLoginManager = OAuthLoginManager(oauthSessionManager, credentialRepository)
+        coordinator = CredentialCoordinator(credentialRepository, oauthLoginManager)
         localProxyServer = LocalProxyServer(
             coordinator = coordinator,
             traceLogDao = database.traceLogDao(),
-            credentialRepository = credentialRepository
+            credentialRepository = credentialRepository,
+            oauthSessionManager = oauthSessionManager,
+            oauthLoginManager = oauthLoginManager
         )
         remoteClient = RemoteManagementClient("http://127.0.0.1:8317", "")
         nsdDiscoveryManager = NsdDiscoveryManager(this)

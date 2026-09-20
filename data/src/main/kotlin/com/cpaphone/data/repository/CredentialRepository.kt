@@ -52,6 +52,16 @@ class CredentialRepository(
         return secureStorage.getSecret(credentialId)
     }
 
+    /** 保存 OAuth refresh token（与 access token 分槽加密存储） */
+    suspend fun saveRefreshToken(credentialId: String, refreshToken: String) {
+        secureStorage.saveRefreshToken(credentialId, refreshToken)
+    }
+
+    /** 读取 OAuth refresh token */
+    fun getRefreshToken(credentialId: String): String? {
+        return secureStorage.getRefreshToken(credentialId)
+    }
+
     suspend fun updateStatus(id: String, status: CredentialStatus, message: String = "") {
         dao.updateStatus(id, status, message)
     }

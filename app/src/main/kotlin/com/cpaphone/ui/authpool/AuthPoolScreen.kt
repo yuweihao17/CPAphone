@@ -1,5 +1,7 @@
 package com.cpaphone.ui.authpool
 
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -13,7 +15,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -22,6 +27,8 @@ import com.cpaphone.core.model.AuthCredential
 import com.cpaphone.core.model.AuthType
 import com.cpaphone.core.model.CredentialStatus
 import com.cpaphone.core.model.ProviderType
+import com.cpaphone.core.session.OAuthFlowStatus
+import com.cpaphone.core.session.OAuthSession
 import com.cpaphone.ui.theme.AccentError
 import com.cpaphone.ui.theme.AccentSecondary
 import com.cpaphone.ui.theme.AccentWarning
@@ -74,19 +81,77 @@ fun AuthPoolScreen() {
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            // —— OAuth 快捷登录区块（对齐 CLIProxyAPI 管理控制台） ——
+            val oauthSessions by app.oauthLoginManager.sessionsFlow.collectAsState()
+            val consumedResults = remember { mutableStateOf(mutableSetOf<String>()) }
+            LaunchedEffect(oauthSessions) {
+                oauthSessions.forEach { session ->
+                    val consumed = when (session.status) {
+                        OAuthFlowStatus.OK -> consumedResults.value.add(session.state)
+                        OAuthFlowStatus.ERROR -> consumedResults.value.add(session.state)
+                        else -> false
+                    }
+                    if (consumed) {
+                        val message = when (session.status) {
+                            OAuthFlowStatus.OK -> "登录成功：${session.resultAlias ?: session.provider.displayName}"
+                            else -> "登录失败：${session.errorMessage ?: "未知错误"}"
+                        }
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+
+            Text(
+                text = "OAuth 快捷登录",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            OAUTH_LOGIN_CARDS.forEach { card ->
+                val activeSession = oauthSessions.firstOrNull {
+                    it.provider == card.provider && it.status == OAuthFlowStatus.WAIT
+                }
+                OAuthLoginCardItem(
+                    card = card,
+                    activeSession = activeSession,
+                    onStart = {
+                        scope.launch {
+                            try {
+                                val result = app.oauthLoginManager.startLogin(card.provider)
+                                result.authorizeUrl?.let { url ->
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                    Toast.makeText(context, "已打开授权页面，请在浏览器中完成登录", Toast.LENGTH_SHORT).show()
+                                }
+                                // 设备码流在卡片内展示 user_code，无需跳转
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "发起登录失败：${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    onCancel = { app.oauthLoginManager.cancelLogin(activeSession?.state ?: "") }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             if (credentials.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 48.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "暂无凭据，点击右下角添加账号或 API Key",
+                        text = "暂无凭据，点击上方登录或右下角手动添加",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                         fontSize = 14.sp
                     )
                 }
             } else {
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(credentials, key = { it.id }) { credential ->
@@ -130,6 +195,143 @@ fun AuthPoolScreen() {
                 }
             }
         )
+    }
+}
+
+/** OAuth 快捷登录卡片展示数据（对齐 CPAMC 控制台的 OAuth 登录列表） */
+private data class OAuthLoginCard(
+    val provider: ProviderType,
+    val title: String,
+    val subtitle: String,
+    val accent: Color
+)
+
+private val OAUTH_LOGIN_CARDS = listOf(
+    OAuthLoginCard(
+        ProviderType.CLAUDE, "Anthropic OAuth",
+        "通过 OAuth 流程登录 Claude 服务，自动获取并保存认证信息。",
+        Color(0xFFD97757)
+    ),
+    OAuthLoginCard(
+        ProviderType.OPENAI_CODEX, "Codex OAuth",
+        "通过 OAuth 流程登录 Codex 服务，自动获取并保存认证信息。",
+        Color(0xFF10A37F)
+    ),
+    OAuthLoginCard(
+        ProviderType.ANTIGRAVITY, "Antigravity OAuth",
+        "使用 Google 账号授权 Antigravity 服务，自动获取并保存认证信息。",
+        Color(0xFF4285F4)
+    ),
+    OAuthLoginCard(
+        ProviderType.KIMI, "Kimi OAuth",
+        "通过设备码登录 Kimi 服务，在验证页输入设备码完成授权。",
+        Color(0xFF16B3A6)
+    ),
+    OAuthLoginCard(
+        ProviderType.XAI, "xAI Grok OAuth",
+        "通过设备码登录 xAI 服务，在验证页输入设备码完成授权。",
+        Color(0xFF9AA0A6)
+    )
+)
+
+/**
+ * 单个 OAuth 服务商登录卡片：空闲显示"开始登录"，进行中显示进度与设备码辅助操作
+ */
+@Composable
+fun OAuthLoginCardItem(
+    card: OAuthLoginCard,
+    activeSession: OAuthSession?,
+    onStart: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .background(card.accent, CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(text = card.title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                }
+
+                if (activeSession == null) {
+                    FilledTonalButton(onClick = onStart, contentPadding = PaddingValues(horizontal = 14.dp)) {
+                        Text("开始登录", fontSize = 12.sp)
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                            Text("取消", fontSize = 12.sp, color = AccentError)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = card.subtitle,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+            )
+
+            // 设备码流进行中：展示 user_code 与验证页辅助操作
+            val userCode = activeSession?.userCode
+            if (userCode != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "设备码：$userCode",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    TextButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(userCode))
+                            Toast.makeText(context, "设备码已复制", Toast.LENGTH_SHORT).show()
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("复制", fontSize = 12.sp)
+                    }
+                    activeSession.verificationUrl?.let { url ->
+                        TextButton(
+                            onClick = {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text("打开验证页", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

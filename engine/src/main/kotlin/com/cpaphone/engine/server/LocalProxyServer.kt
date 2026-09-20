@@ -44,13 +44,17 @@ class LocalProxyServer(
     private val coordinator: CredentialCoordinator,
     private val traceLogDao: TraceLogDao,
     private val credentialRepository: com.cpaphone.data.repository.CredentialRepository? = null,
+    private val oauthSessionManager: com.cpaphone.core.session.OAuthSessionManager = com.cpaphone.core.session.OAuthSessionManager(),
+    private val oauthLoginManager: com.cpaphone.engine.oauth.OAuthLoginManager? = null,
     private val upstreamClient: UpstreamHttpClient = UpstreamHttpClient(),
     val realtimeRelayManager: RealtimeRelayManager = RealtimeRelayManager(coordinator)
 ) {
     private val managementHandler = ManagementRouteHandler(
         coordinator = coordinator,
         credentialRepository = credentialRepository ?: createFallbackRepo(),
-        traceLogDao = traceLogDao
+        traceLogDao = traceLogDao,
+        oauthSessionManager = oauthSessionManager,
+        oauthLoginManager = oauthLoginManager
     )
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private val isRunning = AtomicBoolean(false)

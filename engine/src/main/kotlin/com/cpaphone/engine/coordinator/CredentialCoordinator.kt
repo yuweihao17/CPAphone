@@ -1,6 +1,7 @@
 package com.cpaphone.engine.coordinator
 
 import com.cpaphone.core.model.AuthCredential
+import com.cpaphone.core.model.AuthType
 import com.cpaphone.core.model.ProviderType
 import com.cpaphone.core.model.RoutingStrategyType
 import com.cpaphone.core.routing.FillFirstLoadBalancer
@@ -10,9 +11,12 @@ import com.cpaphone.core.routing.SmoothWeightedRoundRobinLoadBalancer
 import com.cpaphone.core.session.CooldownManager
 import com.cpaphone.core.session.SessionAffinityManager
 import com.cpaphone.data.repository.CredentialRepository
+import com.cpaphone.engine.oauth.OAuthLoginManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 核心凭据调度协同器
@@ -20,12 +24,14 @@ import kotlinx.coroutines.launch
  */
 class CredentialCoordinator(
     private val credentialRepository: CredentialRepository,
+    private val oauthLoginManager: OAuthLoginManager? = null,
     private val affinityManager: SessionAffinityManager = SessionAffinityManager(),
     val cooldownManager: CooldownManager = CooldownManager()
 ) {
     private var strategyType: RoutingStrategyType = RoutingStrategyType.WEIGHTED_ROUND_ROBIN
     private var currentBalancer: LoadBalancer = SmoothWeightedRoundRobinLoadBalancer()
     private val backgroundScope = CoroutineScope(Dispatchers.IO)
+    private val oauthRefreshMutex = Mutex()
 
     fun updateStrategy(newStrategy: RoutingStrategyType) {
         if (strategyType != newStrategy) {
@@ -62,7 +68,7 @@ class CredentialCoordinator(
         if (!sessionKey.isNullOrBlank()) {
             val bound = affinityManager.getAffinity(sessionKey, available)
             if (bound != null) {
-                val secretKey = credentialRepository.getSecretKey(bound.id) ?: ""
+                val secretKey = ensureFreshSecret(bound)
                 return Pair(bound, secretKey)
             }
         }
@@ -76,7 +82,7 @@ class CredentialCoordinator(
 
         // 4. 执行负载均衡算法选择最优凭据
         val selected = currentBalancer.select(matched) ?: return null
-        val secretKey = credentialRepository.getSecretKey(selected.id) ?: ""
+        val secretKey = ensureFreshSecret(selected)
 
         // 5. 若传入会话，建立绑定关联
         if (!sessionKey.isNullOrBlank()) {
@@ -84,6 +90,29 @@ class CredentialCoordinator(
         }
 
         return Pair(selected, secretKey)
+    }
+
+    /**
+     * OAuth 凭据 proactive 续期：过期前 5 分钟内用 refresh_token 刷新，
+     * 刷新失败时保留原 token 照常调度（由后续 401 冷却兜底）
+     */
+    private suspend fun ensureFreshSecret(credential: AuthCredential): String {
+        val secret = credentialRepository.getSecretKey(credential.id) ?: ""
+        val manager = oauthLoginManager ?: return secret
+        if (credential.authType != AuthType.OAUTH) return secret
+        if (credential.expiresAt <= 0L || credential.expiresAt - System.currentTimeMillis() > 5 * 60_000L) return secret
+
+        oauthRefreshMutex.withLock {
+            // 双重检查：并发请求可能已完成刷新
+            val latest = credentialRepository.getCredentialById(credential.id)
+            if (latest != null &&
+                latest.expiresAt > 0L &&
+                latest.expiresAt - System.currentTimeMillis() <= 5 * 60_000L
+            ) {
+                manager.refreshCredential(latest)
+            }
+        }
+        return credentialRepository.getSecretKey(credential.id) ?: secret
     }
 
     /**
