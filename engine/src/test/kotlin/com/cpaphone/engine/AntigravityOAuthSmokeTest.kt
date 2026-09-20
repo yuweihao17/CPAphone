@@ -78,7 +78,8 @@ class AntigravityOAuthSmokeTest {
             while (System.currentTimeMillis() - start < deadline * 60_000L) {
                 // 处理用户粘贴的完整 URL：先去掉路径部分（首个 ? 之前），再解析键值对
                 if (manualFile.exists()) {
-                    val content = manualFile.readText().substringAfter('?', content)
+                    val raw = manualFile.readText()
+                    val content = raw.substringAfter('?', raw)
                     val params = content.split("&").filter { it.contains('=') }.associate {
                         it.substringBefore('=') to (it.substringAfter('=', "").let { v ->
                             java.net.URLDecoder.decode(v, "UTF-8")
