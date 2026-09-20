@@ -238,7 +238,7 @@ private val OAUTH_LOGIN_CARDS = listOf(
  * 单个 OAuth 服务商登录卡片：空闲显示"开始登录"，进行中显示进度与设备码辅助操作
  */
 @Composable
-fun OAuthLoginCardItem(
+private fun OAuthLoginCardItem(
     card: OAuthLoginCard,
     activeSession: OAuthSession?,
     onStart: () -> Unit,
