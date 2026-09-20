@@ -10,6 +10,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -150,6 +151,30 @@ class AntigravityClient {
     }
 
     /**
+     * 发起云码真流式推理（对齐 CLIProxyAPI ExecuteStream）
+     * POST /v1internal:streamGenerateContent?alt=sse，请求体与非流式完全相同。
+     * 返回上游 SSE 字节流：帧格式 data: {"response":{candidates...},"traceId":...}，无 [DONE]，连接关闭即结束。
+     */
+    suspend fun streamGenerateContent(
+        accessToken: String,
+        projectId: String,
+        model: String,
+        unified: UnifiedChatRequest
+    ): io.ktor.utils.io.ByteReadChannel {
+        val response = client.post("$INFERENCE_BASE/v1internal:streamGenerateContent?alt=sse") {
+            header(HttpHeaders.Authorization, "Bearer $accessToken")
+            header(HttpHeaders.UserAgent, USER_AGENT)
+            contentType(ContentType.Application.Json)
+            setBody(buildRequestEnvelope(projectId, model, unified).toString())
+        }
+        if (!response.status.isSuccess()) {
+            val text = response.bodyAsText()
+            throw AntigravityInferenceException("云码流式推理失败 HTTP ${response.status.value}: ${text.take(300)}")
+        }
+        return response.bodyAsChannel()
+    }
+
+    /**
      * 云码请求信封构造（对齐 CLIProxyAPI geminiToAntigravity）：
      * - tools → request.tools[].functionDeclarations（camelCase，parameters 直接透传）
      * - 有工具时注入 request.toolConfig.functionCallingConfig.mode=AUTO
@@ -187,6 +212,15 @@ class AntigravityClient {
                 }
                 putJsonObject("toolConfig") {
                     putJsonObject("functionCallingConfig") { put("mode", "AUTO") }
+                }
+            }
+            // generationConfig：对齐 CLIProxyAPI buildRequest——非 Claude 模型不设 maxOutputTokens
+            // （上游不限长，思考模型的思考+输出不会被配额截断）；temperature/topP/thinkingBudget 透传
+            putJsonObject("generationConfig") {
+                unified.temperature?.let { put("temperature", it) }
+                unified.topP?.let { put("topP", it) }
+                unified.thinkingBudgetTokens?.let { budget ->
+                    putJsonObject("thinkingConfig") { put("thinkingBudget", budget) }
                 }
             }
         }

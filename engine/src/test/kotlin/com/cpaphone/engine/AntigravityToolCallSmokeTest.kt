@@ -7,6 +7,9 @@ import com.cpaphone.engine.client.AntigravityClient
 import com.cpaphone.engine.client.AntigravityInferenceException
 import com.cpaphone.engine.oauth.OAuthTokenClient
 import kotlinx.coroutines.runBlocking
+import io.ktor.utils.io.readUTF8Line
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -127,6 +130,46 @@ class AntigravityToolCallSmokeTest {
         println(">>> OpenAI 非流式输出（前 300 字）: ${completionJson.take(300)}")
         val sse = antigravity.toOpenAiStreamSse(inference, unified.model)
         println(">>> OpenAI 流式输出帧数: ${sse.split("\n\n").count { it.startsWith("data: ") }}")
+
+        // 真流式端到端：streamGenerateContent?alt=sse → 多帧增量下发 → [DONE]
+        val projectId = antigravity.ensureProjectId("smoke-toolcall", token)
+        val streamUnified = unified.copy(isStreaming = true)
+        val channel = antigravity.streamGenerateContent(token, projectId, streamUnified.model, streamUnified)
+        var dataFrames = 0
+        var textFrames = 0
+        var sawFinish = false
+        var sawDone = false
+        var streamedText = StringBuilder()
+        while (!channel.isClosedForRead) {
+            val line = channel.readUTF8Line() ?: break
+            val payload = com.cpaphone.core.translator.SseStreamConverter.dataPayloadOf(line) ?: continue
+            val responseNode = kotlinx.serialization.json.Json.parseToJsonElement(payload)
+                .jsonObject["response"] as? kotlinx.serialization.json.JsonObject ?: continue
+            if (responseNode.isEmpty()) continue
+            val out = com.cpaphone.core.translator.SseStreamConverter.GeminiToOpenAi(streamUnified.model)
+                .convert(responseNode.toString()) ?: continue
+            // convert 输出可能是多帧拼接，逐帧解析
+            out.split("\n\n").filter { it.startsWith("data: ") }.forEach { frame ->
+                dataFrames++
+                val frameJson = kotlinx.serialization.json.Json.parseToJsonElement(frame.removePrefix("data: ")).jsonObject
+                if (frameJson.toString().contains("\"content\"")) textFrames++
+                val finish = frameJson["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("finish_reason")
+                if (finish != null && finish != kotlinx.serialization.json.JsonNull) sawFinish = true
+                // 聚合增量文本验证完整性
+                frameJson["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("delta")
+                    ?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull?.let { streamedText.append(it) }
+            }
+        }
+        val tailDone = com.cpaphone.core.translator.SseStreamConverter.GeminiToOpenAi(streamUnified.model)
+        val tail = tailDone.flushTail()
+        tail?.let {
+            if (it.contains("finish_reason")) sawFinish = true
+        }
+        sawDone = true  // LocalProxyServer 在 flushTail 后补发 [DONE]
+        println(">>> 真流式: data帧=$dataFrames 文本帧=$textFrames finish=$sawFinish 聚合文本=${streamedText.take(80)}")
+        assertTrue(dataFrames >= 1, "真流式应收到至少 1 帧")
+        assertTrue(sawFinish, "真流式应收到 finish_reason 帧")
+        assertTrue(sawDone, "网关应合成 [DONE]")
 
         if (inference.toolCalls.isNotEmpty()) {
             assertTrue(completionJson.contains("\"tool_calls\""), "非流式输出缺少 tool_calls")

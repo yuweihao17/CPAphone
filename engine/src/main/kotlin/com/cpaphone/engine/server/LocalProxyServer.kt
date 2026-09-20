@@ -303,30 +303,78 @@ class LocalProxyServer(
     ) {
         try {
             val projectId = antigravityClient.ensureProjectId(credential.id, accessToken)
-            val inference = antigravityClient.generateContent(
-                accessToken = accessToken,
-                projectId = projectId,
-                model = parsedRequest.model,
-                unified = parsedRequest
-            )
             coordinator.reportSuccess(credential.id)
-            recordTrace(
-                traceId = traceId,
-                model = parsedRequest.model,
-                credential = credential,
-                statusCode = 200,
-                durationMs = System.currentTimeMillis() - startTime,
-                isStreaming = parsedRequest.isStreaming,
-                retryCount = retryCount,
-                errorMessage = null
-            )
 
             if (parsedRequest.isStreaming) {
-                call.respondText(
-                    antigravityClient.toOpenAiStreamSse(inference, parsedRequest.model),
-                    ContentType.Text.EventStream
+                // 真流式：上游 streamGenerateContent?alt=sse → 剥 response 壳 → GeminiToOpenAi 逐帧转译
+                val upstreamChannel = antigravityClient.streamGenerateContent(
+                    accessToken = accessToken,
+                    projectId = projectId,
+                    model = parsedRequest.model,
+                    unified = parsedRequest
+                )
+                val converter = SseStreamConverter.GeminiToOpenAi(parsedRequest.model)
+                call.response.status(HttpStatusCode.OK)
+                call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
+                call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                call.response.headers.append("X-Cpa-Trace-Id", traceId)
+                call.respondBytesWriter {
+                    while (!upstreamChannel.isClosedForRead) {
+                        val line = upstreamChannel.readUTF8Line() ?: break
+                        val payload = SseStreamConverter.dataPayloadOf(line) ?: continue
+                        // Antigravity 帧：{"response":{candidates...},"traceId":...}，剥壳取 response 节点
+                        val responseNode = try {
+                            kotlinx.serialization.json.Json.parseToJsonElement(payload)
+                                .jsonObject["response"] as? JsonObject
+                        } catch (_: Exception) {
+                            null
+                        } ?: continue
+                        // 空信封心跳帧 {"response":{}} 跳过
+                        if (responseNode.isEmpty()) continue
+                        val translated = converter.convert(responseNode.toString())
+                        if (translated != null) {
+                            val bytes = translated.toByteArray(StandardCharsets.UTF_8)
+                            writeFully(bytes, 0, bytes.size)
+                            flush()
+                        }
+                    }
+                    // 上游无 [DONE]：连接关闭后由转换器合成终帧，再补 [DONE]
+                    converter.flushTail()?.let { tail ->
+                        val bytes = tail.toByteArray(StandardCharsets.UTF_8)
+                        writeFully(bytes, 0, bytes.size)
+                        flush()
+                    }
+                    val done = "data: [DONE]\n\n".toByteArray(StandardCharsets.UTF_8)
+                    writeFully(done, 0, done.size)
+                    flush()
+                }
+                recordTrace(
+                    traceId = traceId,
+                    model = parsedRequest.model,
+                    credential = credential,
+                    statusCode = 200,
+                    durationMs = System.currentTimeMillis() - startTime,
+                    isStreaming = true,
+                    retryCount = retryCount,
+                    errorMessage = null
                 )
             } else {
+                val inference = antigravityClient.generateContent(
+                    accessToken = accessToken,
+                    projectId = projectId,
+                    model = parsedRequest.model,
+                    unified = parsedRequest
+                )
+                recordTrace(
+                    traceId = traceId,
+                    model = parsedRequest.model,
+                    credential = credential,
+                    statusCode = 200,
+                    durationMs = System.currentTimeMillis() - startTime,
+                    isStreaming = false,
+                    retryCount = retryCount,
+                    errorMessage = null
+                )
                 call.respondText(
                     antigravityClient.toOpenAiCompletionJson(inference, parsedRequest.model),
                     ContentType.Application.Json
