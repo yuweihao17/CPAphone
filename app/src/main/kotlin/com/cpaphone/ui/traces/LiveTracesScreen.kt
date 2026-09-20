@@ -168,8 +168,9 @@ fun ExpandableTraceCard(trace: TraceLogEntity) {
                     DetailRow(label = "入站协议", value = trace.inboundProtocol)
                     DetailRow(label = "传输形态", value = if (trace.isStreaming) "SSE 流式管道" else "阻塞块式传输")
                     DetailRow(label = "重试换号次数", value = "${trace.retryCount} 次")
-                    if (!trace.errorMessage.isNullOrBlank()) {
-                        DetailRow(label = "错误详情", value = trace.errorMessage, isError = true)
+                    val errorMessage = trace.errorMessage
+                    if (!errorMessage.isNullOrBlank()) {
+                        DetailRow(label = "错误详情", value = errorMessage, isError = true)
                     }
                 }
             }

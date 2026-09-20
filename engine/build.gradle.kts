@@ -32,9 +32,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
 
-    // Room：data 模块的 CpaDatabase 继承自 RoomDatabase，编译期需可访问其超类型
-    implementation(libs.androidx.room.runtime)
-
     // Ktor Embedded Server (CIO)
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.cio)
