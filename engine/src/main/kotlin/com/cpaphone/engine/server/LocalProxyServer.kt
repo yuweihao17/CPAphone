@@ -2,8 +2,9 @@ package com.cpaphone.engine.server
 
 import com.cpaphone.core.model.ClientSecretRequest
 import com.cpaphone.core.model.ProviderType
+import com.cpaphone.core.translator.CrossProtocolResponseTranslator
 import com.cpaphone.core.translator.ProtocolTranslatorEngine
-import com.cpaphone.core.translator.StreamChunkTranslator
+import com.cpaphone.core.translator.SseStreamConverter
 import com.cpaphone.data.local.dao.TraceLogDao
 import com.cpaphone.data.local.entity.TraceLogEntity
 import com.cpaphone.engine.client.UpstreamCallResult
@@ -126,13 +127,21 @@ class LocalProxyServer(
                     handleChatCompletions(call, inboundProtocol = "claude")
                 }
 
-                // Google Gemini 规范兼容端点
+                // Google Gemini 规范兼容端点（:generateContent / :streamGenerateContent）
                 post("/v1beta/models/{model...}") {
                     if (isSafeModeBlocked(call)) {
                         respondSafeModeBlocked(call)
                         return@post
                     }
-                    handleChatCompletions(call, inboundProtocol = "gemini")
+                    val pathModel = call.parameters["model..."] ?: ""
+                    val model = pathModel.substringBefore(':').substringAfterLast('/')
+                    val action = pathModel.substringAfter(':', "").substringBefore('?')
+                    handleChatCompletions(
+                        call,
+                        inboundProtocol = "gemini",
+                        geminiModel = model,
+                        geminiAction = action
+                    )
                 }
 
                 // =========================================================================
@@ -312,17 +321,25 @@ class LocalProxyServer(
         call.respondText("""{"object":"list","data":[$data]}""", ContentType.Application.Json)
     }
 
-    private suspend fun handleChatCompletions(call: ApplicationCall, inboundProtocol: String) {
+    private suspend fun handleChatCompletions(
+        call: ApplicationCall,
+        inboundProtocol: String,
+        geminiModel: String? = null,
+        geminiAction: String? = null
+    ) {
         val startTime = System.currentTimeMillis()
         val traceId = "cpa-" + UUID.randomUUID().toString().substring(0, 8)
         totalRequestsCount.incrementAndGet()
 
         val rawBody = call.receiveText()
         val parsedRequest = try {
-            if (inboundProtocol == "claude") {
-                ProtocolTranslatorEngine.parseClaudeMessagesRequest(rawBody)
-            } else {
-                ProtocolTranslatorEngine.parseOpenAiChatRequest(rawBody)
+            when (inboundProtocol) {
+                "claude" -> ProtocolTranslatorEngine.parseClaudeMessagesRequest(rawBody)
+                "gemini" -> {
+                    val parsed = ProtocolTranslatorEngine.parseGeminiRequest(rawBody, geminiModel ?: "unknown")
+                    parsed.copy(isStreaming = geminiAction == "streamGenerateContent")
+                }
+                else -> ProtocolTranslatorEngine.parseOpenAiChatRequest(rawBody)
             }
         } catch (_: Exception) {
             call.respond(
@@ -367,15 +384,17 @@ class LocalProxyServer(
                 ProviderType.CLAUDE -> {
                     Pair("/v1/messages", ProtocolTranslatorEngine.toClaudeMessagesJson(parsedRequest))
                 }
-                ProviderType.GEMINI, ProviderType.ANTIGRAVITY -> {
+                ProviderType.GEMINI -> {
+                    // 流式请求必须调用上游 streamGenerateContent（alt=sse），否则上游返回非流式 JSON 破坏 SSE 协议
+                    val method = if (parsedRequest.isStreaming) "streamGenerateContent?alt=sse" else "generateContent"
                     Pair(
-                        "/v1beta/models/${parsedRequest.model}:generateContent",
+                        "/v1beta/models/${parsedRequest.model}:$method",
                         ProtocolTranslatorEngine.toGeminiGenerateContentJson(parsedRequest)
                     )
                 }
                 else -> {
-                    // 若下游传入的是 Claude Messages 格式，而目标是 OpenAI 兼容服务，转译为 OpenAI Chat JSON
-                    val body = if (inboundProtocol == "claude") {
+                    // 非 OpenAI 入站（Claude Messages / Gemini contents）转译为 OpenAI Chat JSON
+                    val body = if (inboundProtocol != "openai") {
                         ProtocolTranslatorEngine.toOpenAiChatJson(parsedRequest)
                     } else {
                         rawBody
@@ -410,37 +429,70 @@ class LocalProxyServer(
 
         val duration = System.currentTimeMillis() - startTime
 
-        // 处理最终输出与流式重构
+        // 处理最终输出：协议一致零拷贝透传；跨协议走全矩阵转译（对齐 CLIProxyAPI translator 注册表）
         when (finalResult) {
             is UpstreamCallResult.Success -> {
-                call.response.status(finalResult.statusCode)
-                call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
-                call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
-                call.response.headers.append(HttpHeaders.Connection, "keep-alive")
-                call.response.headers.append("X-Cpa-Trace-Id", traceId)
-
                 val provider = chosenCredential?.provider ?: ProviderType.OPENAI_COMPATIBLE
+                val inbound = inboundProtocolOf(inboundProtocol)
+                val outbound = outboundProtocolOf(provider)
 
-                call.respondBytesWriter {
-                    if (parsedRequest.isStreaming && inboundProtocol == "openai" && provider == ProviderType.CLAUDE) {
-                        // 跨协议流式重构转译管道：将 Claude SSE 逐行实时重构为 OpenAI 规范 chunk
+                if (inbound == outbound && !parsedRequest.isStreaming) {
+                    // 协议一致 + 非流式：零拷贝透传
+                    call.response.status(finalResult.statusCode)
+                    call.response.headers.append("X-Cpa-Trace-Id", traceId)
+                    call.respondBytesWriter { finalResult.responseChannel.copyTo(this) }
+                } else if (inbound == outbound) {
+                    // 协议一致 + 流式：零拷贝透传
+                    call.response.status(finalResult.statusCode)
+                    call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
+                    call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                    call.response.headers.append("X-Cpa-Trace-Id", traceId)
+                    call.respondBytesWriter { finalResult.responseChannel.copyTo(this) }
+                } else if (parsedRequest.isStreaming) {
+                    // 跨协议流式：有状态转换器逐行实时转译
+                    val converter = streamConverterFor(inbound, outbound, parsedRequest.model)
+                    if (converter == null) {
+                        call.respondText(
+                            "{\"error\":{\"message\":\"Unsupported protocol pair\",\"type\":\"server_error\",\"code\":500}}",
+                            ContentType.Application.Json, HttpStatusCode.InternalServerError
+                        )
+                        return
+                    }
+                    call.response.status(finalResult.statusCode)
+                    call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
+                    call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                    call.response.headers.append("X-Cpa-Trace-Id", traceId)
+                    call.respondBytesWriter {
                         while (!finalResult.responseChannel.isClosedForRead) {
                             val line = finalResult.responseChannel.readUTF8Line() ?: break
-                            val translatedChunk = StreamChunkTranslator.translateClaudeToOpenAiChunk(
-                                claudeEventLine = line,
-                                modelName = parsedRequest.model,
-                                chunkId = traceId
-                            )
-                            if (translatedChunk != null) {
-                                val bytes = translatedChunk.toByteArray(StandardCharsets.UTF_8)
+                            val payload = SseStreamConverter.dataPayloadOf(line) ?: continue
+                            val translated = converter.convert(payload)
+                            if (translated != null) {
+                                val bytes = translated.toByteArray(StandardCharsets.UTF_8)
                                 writeFully(bytes, 0, bytes.size)
                                 flush()
                             }
                         }
-                    } else {
-                        // 协议一致：直接进行内核级零拷贝透传
-                        finalResult.responseChannel.copyTo(this)
+                        converter.flushTail()?.let { tail ->
+                            val bytes = tail.toByteArray(StandardCharsets.UTF_8)
+                            writeFully(bytes, 0, bytes.size)
+                            flush()
+                        }
                     }
+                } else {
+                    // 跨协议非流式：读全文一次性转译
+                    val upstreamText = buildString {
+                        while (!finalResult.responseChannel.isClosedForRead) {
+                            append(finalResult.responseChannel.readUTF8Line() ?: break)
+                            append("\n")
+                        }
+                    }.trim()
+                    val translated = CrossProtocolResponseTranslator.translate(
+                        upstreamText, outbound, inbound, parsedRequest.model
+                    )
+                    call.response.status(finalResult.statusCode)
+                    call.response.headers.append("X-Cpa-Trace-Id", traceId)
+                    call.respondText(translated, ContentType.Application.Json)
                 }
 
                 recordTrace(
@@ -556,6 +608,41 @@ class LocalProxyServer(
         } else {
             call.respondText("{\"error\":{\"message\":\"Call ID not found or already closed\",\"type\":\"not_found\"}}", ContentType.Application.Json, HttpStatusCode.NotFound)
         }
+    }
+
+    /** 入站协议字符串 → 转译协议面 */
+    private fun inboundProtocolOf(protocol: String): CrossProtocolResponseTranslator.Protocol = when (protocol) {
+        "claude" -> CrossProtocolResponseTranslator.Protocol.CLAUDE
+        "gemini" -> CrossProtocolResponseTranslator.Protocol.GEMINI
+        else -> CrossProtocolResponseTranslator.Protocol.OPENAI
+    }
+
+    /** 凭据提供商 → 上游协议面（ANTIGRAVITY 不走通用管道，兜底归入 GEMINI 方言） */
+    private fun outboundProtocolOf(provider: ProviderType): CrossProtocolResponseTranslator.Protocol = when (provider) {
+        ProviderType.CLAUDE -> CrossProtocolResponseTranslator.Protocol.CLAUDE
+        ProviderType.GEMINI, ProviderType.ANTIGRAVITY -> CrossProtocolResponseTranslator.Protocol.GEMINI
+        else -> CrossProtocolResponseTranslator.Protocol.OPENAI
+    }
+
+    /** 跨协议流式转换器选择（对齐 CLIProxyAPI translator 注册表六方向） */
+    private fun streamConverterFor(
+        inbound: CrossProtocolResponseTranslator.Protocol,
+        outbound: CrossProtocolResponseTranslator.Protocol,
+        model: String
+    ): SseStreamConverter? = when {
+        inbound == CrossProtocolResponseTranslator.Protocol.CLAUDE &&
+            outbound == CrossProtocolResponseTranslator.Protocol.OPENAI -> SseStreamConverter.ClaudeToOpenAi(model)
+        inbound == CrossProtocolResponseTranslator.Protocol.GEMINI &&
+            outbound == CrossProtocolResponseTranslator.Protocol.OPENAI -> SseStreamConverter.GeminiToOpenAi(model)
+        inbound == CrossProtocolResponseTranslator.Protocol.OPENAI &&
+            outbound == CrossProtocolResponseTranslator.Protocol.CLAUDE -> SseStreamConverter.OpenAiToClaude(model)
+        inbound == CrossProtocolResponseTranslator.Protocol.OPENAI &&
+            outbound == CrossProtocolResponseTranslator.Protocol.GEMINI -> SseStreamConverter.OpenAiToGemini()
+        inbound == CrossProtocolResponseTranslator.Protocol.CLAUDE &&
+            outbound == CrossProtocolResponseTranslator.Protocol.GEMINI -> SseStreamConverter.ClaudeToGemini()
+        inbound == CrossProtocolResponseTranslator.Protocol.GEMINI &&
+            outbound == CrossProtocolResponseTranslator.Protocol.CLAUDE -> SseStreamConverter.GeminiToClaude(model)
+        else -> null
     }
 
     private fun isSafeModeBlocked(call: ApplicationCall): Boolean {

@@ -4,7 +4,7 @@ import com.cpaphone.core.model.AuthCredential
 import com.cpaphone.core.model.AuthType
 import com.cpaphone.core.model.CredentialStatus
 import com.cpaphone.core.model.ProviderType
-import com.cpaphone.core.translator.StreamChunkTranslator
+import com.cpaphone.core.translator.SseStreamConverter
 import com.cpaphone.engine.coordinator.CredentialCoordinator
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -14,14 +14,11 @@ class EnginePipelineTest {
 
     @Test
     fun testStreamChunkReconstructionPipeline() {
-        // 模拟上游返回的 Claude 原生流事件
-        val claudeThinkingEvent = "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"Step 1: Parse input\"}}"
-        val claudeTextEvent = "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"Quicksort is fast.\"}}"
-        val claudeEndEvent = "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\"}}"
-
-        val chunk1 = StreamChunkTranslator.translateClaudeToOpenAiChunk(claudeThinkingEvent, "claude-3-7-sonnet")
-        val chunk2 = StreamChunkTranslator.translateClaudeToOpenAiChunk(claudeTextEvent, "claude-3-7-sonnet")
-        val chunk3 = StreamChunkTranslator.translateClaudeToOpenAiChunk(claudeEndEvent, "claude-3-7-sonnet")
+        // 模拟上游返回的 Claude 原生流事件（data: 载荷传入有状态转换器）
+        val converter = SseStreamConverter.ClaudeToOpenAi("claude-3-7-sonnet")
+        val chunk1 = converter.convert("""{"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "Step 1: Parse input"}}""")
+        val chunk2 = converter.convert("""{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Quicksort is fast."}}""")
+        val chunk3 = converter.convert("""{"type": "message_delta", "delta": {"stop_reason": "end_turn"}}""")
 
         assertNotNull(chunk1)
         assertTrue(chunk1!!.contains("reasoning_content"))

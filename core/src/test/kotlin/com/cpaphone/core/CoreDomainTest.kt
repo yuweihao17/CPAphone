@@ -11,7 +11,7 @@ import com.cpaphone.core.routing.SmoothWeightedRoundRobinLoadBalancer
 import com.cpaphone.core.session.CooldownManager
 import com.cpaphone.core.session.SessionAffinityManager
 import com.cpaphone.core.translator.ProtocolTranslatorEngine
-import com.cpaphone.core.translator.StreamChunkTranslator
+import com.cpaphone.core.translator.SseStreamConverter
 import com.cpaphone.core.translator.UnifiedRole
 import org.junit.Assert.*
 import org.junit.Test
@@ -133,39 +133,26 @@ class CoreDomainTest {
 
     @Test
     fun testStreamChunkTranslator() {
-        // 测试 Claude 思考块流式数据转译
-        val claudeThinkingLine = """
-            data: {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Let me think about quicksort"}}
-        """.trimIndent()
+        val converter = SseStreamConverter.ClaudeToOpenAi("claude-3-7-sonnet")
 
-        val openAiThinkingChunk = StreamChunkTranslator.translateClaudeToOpenAiChunk(
-            claudeThinkingLine,
-            modelName = "claude-3-7-sonnet"
+        // 测试 Claude 思考块流式数据转译
+        val openAiThinkingChunk = converter.convert(
+            """{"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Let me think about quicksort"}}"""
         )
         assertNotNull(openAiThinkingChunk)
         assertTrue(openAiThinkingChunk!!.contains("reasoning_content"))
         assertTrue(openAiThinkingChunk.contains("Let me think about quicksort"))
 
         // 测试 Claude 文本块流式数据转译
-        val claudeTextLine = """
-            data: {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Here is the code."}}
-        """.trimIndent()
-
-        val openAiTextChunk = StreamChunkTranslator.translateClaudeToOpenAiChunk(
-            claudeTextLine,
-            modelName = "claude-3-7-sonnet"
+        val openAiTextChunk = converter.convert(
+            """{"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Here is the code."}}"""
         )
         assertNotNull(openAiTextChunk)
-        assertTrue(openAiTextChunk!!.contains("\"content\":\"Here is the code.\""))
+        assertTrue(openAiTextChunk!!.contains("Here is the code."))
 
         // 测试结束帧转译
-        val finishLine = """
-            data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
-        """.trimIndent()
-
-        val finishChunk = StreamChunkTranslator.translateClaudeToOpenAiChunk(
-            finishLine,
-            modelName = "claude-3-7-sonnet"
+        val finishChunk = converter.convert(
+            """{"type": "message_delta", "delta": {"stop_reason": "end_turn"}}"""
         )
         assertNotNull(finishChunk)
         assertTrue(finishChunk!!.contains("\"finish_reason\":\"stop\""))

@@ -11,7 +11,7 @@ import com.cpaphone.core.signature.SignatureDecisionAction
 import com.cpaphone.core.signature.SignatureProvider
 import com.cpaphone.core.signature.SignatureSniffer
 import com.cpaphone.core.translator.ProtocolTranslatorEngine
-import com.cpaphone.core.translator.StreamChunkTranslator
+import com.cpaphone.core.translator.SseStreamConverter
 import com.cpaphone.engine.coordinator.CredentialCoordinator
 import com.cpaphone.engine.home.HomeClusterClient
 import kotlinx.coroutines.runBlocking
@@ -133,11 +133,9 @@ class E2EFullScenarioIntegrationTest {
         // =====================================================================
         // Step 6: 上游 Claude SSE 流式数据帧实时重构为 OpenAI 规范 Chunk
         // =====================================================================
-        val upstreamClaudeChunk = "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"Writing clean code requires discipline.\"}}"
-        val reconstructedOpenAiChunk = StreamChunkTranslator.translateClaudeToOpenAiChunk(
-            claudeEventLine = upstreamClaudeChunk,
-            modelName = "claude-3-7-sonnet",
-            chunkId = "chatcmpl-e2e-test"
+        val streamConverter = SseStreamConverter.ClaudeToOpenAi("claude-3-7-sonnet")
+        val reconstructedOpenAiChunk = streamConverter.convert(
+            """{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Writing clean code requires discipline."}}"""
         )
         assertNotNull(reconstructedOpenAiChunk)
         assertTrue(reconstructedOpenAiChunk!!.contains("chat.completion.chunk"))
