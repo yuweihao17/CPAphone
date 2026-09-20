@@ -201,7 +201,11 @@ class UpstreamHttpClient(
                 builder.header("x-api-key", secretKey)
                 builder.header("anthropic-version", "2023-06-01")
             }
-            ProviderType.GEMINI, ProviderType.ANTIGRAVITY -> {
+            ProviderType.ANTIGRAVITY -> {
+                // 云码 OAuth 凭据：Bearer 访问令牌（非 API Key）
+                builder.header(HttpHeaders.Authorization, "Bearer $secretKey")
+            }
+            ProviderType.GEMINI -> {
                 builder.header("x-goog-api-key", secretKey)
             }
             else -> {

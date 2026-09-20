@@ -56,6 +56,7 @@ class LocalProxyServer(
         oauthSessionManager = oauthSessionManager,
         oauthLoginManager = oauthLoginManager
     )
+    private val antigravityClient = com.cpaphone.engine.client.AntigravityClient()
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private val isRunning = AtomicBoolean(false)
     private val totalRequestsCount = AtomicLong(0)
@@ -182,6 +183,75 @@ class LocalProxyServer(
         stateListener?.onStateChanged(false, "127.0.0.1", 0)
     }
 
+    /**
+     * Antigravity 云码协议专用执行管道
+     * 真实上游：POST https://cloudcode-pa.googleapis.com/v1internal:generateContent（Bearer）
+     * 响应转 OpenAI chat.completion 规范；流式请求降级为单块 SSE 规范包装
+     */
+    private suspend fun executeAntigravity(
+        call: ApplicationCall,
+        credential: com.cpaphone.core.model.AuthCredential,
+        accessToken: String,
+        parsedRequest: com.cpaphone.core.translator.UnifiedChatRequest,
+        traceId: String,
+        startTime: Long,
+        retryCount: Int
+    ) {
+        try {
+            val projectId = antigravityClient.ensureProjectId(credential.id, accessToken)
+            val inference = antigravityClient.generateContent(
+                accessToken = accessToken,
+                projectId = projectId,
+                model = parsedRequest.model,
+                unified = parsedRequest
+            )
+            coordinator.reportSuccess(credential.id)
+            recordTrace(
+                traceId = traceId,
+                model = parsedRequest.model,
+                credential = credential,
+                statusCode = 200,
+                durationMs = System.currentTimeMillis() - startTime,
+                isStreaming = parsedRequest.isStreaming,
+                retryCount = retryCount,
+                errorMessage = null
+            )
+
+            if (parsedRequest.isStreaming) {
+                call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
+                call.respondText(
+                    antigravityClient.toOpenAiStreamSse(inference, parsedRequest.model),
+                    ContentType.Text.EventStream
+                )
+            } else {
+                call.respondText(
+                    antigravityClient.toOpenAiCompletionJson(inference, parsedRequest.model),
+                    ContentType.Application.Json
+                )
+            }
+        } catch (e: Exception) {
+            coordinator.reportFailure(credential.id, e.message ?: "antigravity inference failed", 502, parsedRequest.model)
+            val errorPayload = buildJsonObject {
+                putJsonObject("error") {
+                    put("message", e.message ?: "Antigravity inference failed")
+                    put("type", "upstream_error")
+                    put("code", 502)
+                }
+            }.toString()
+            call.respondText(errorPayload, ContentType.Application.Json, HttpStatusCode.BadGateway)
+            recordTrace(
+                traceId = traceId,
+                model = parsedRequest.model,
+                credential = credential,
+                statusCode = 502,
+                durationMs = System.currentTimeMillis() - startTime,
+                isStreaming = parsedRequest.isStreaming,
+                retryCount = retryCount,
+                errorMessage = e.message
+            )
+        }
+    }
+
     private suspend fun handleModels(call: ApplicationCall) {
         // 对齐 CLIProxyAPI：/v1/models 按「凭据池中实际存在的提供商」动态聚合，
         // 不再返回与凭据无关的静态清单（登录 Antigravity 即只见 gemini/antigravity 系模型）
@@ -239,6 +309,19 @@ class LocalProxyServer(
             }
             val (credential, secretKey) = acquired
             chosenCredential = credential
+
+            // Antigravity 云码协议专用管道：Bearer + project 信封 + 响应转 OpenAI（不走通用 API-Key 通道）
+            if (credential.provider == ProviderType.ANTIGRAVITY) {
+                return executeAntigravity(
+                    call = call,
+                    credential = credential,
+                    accessToken = secretKey,
+                    parsedRequest = parsedRequest,
+                    traceId = traceId,
+                    startTime = startTime,
+                    retryCount = retryCount
+                )
+            }
 
             // 协议转译：按目标提供商构建专用请求体与路由路径
             val (targetPath, targetBody) = when (credential.provider) {

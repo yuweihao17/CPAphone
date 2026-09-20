@@ -4,6 +4,10 @@ import com.cpaphone.core.model.ModelCatalog
 import com.cpaphone.core.model.ProviderType
 import com.cpaphone.core.oauth.PROVIDER_SPECS
 import com.cpaphone.core.session.OAuthSessionManager
+import com.cpaphone.core.translator.UnifiedChatRequest
+import com.cpaphone.core.translator.UnifiedContentPart
+import com.cpaphone.core.translator.UnifiedMessage
+import com.cpaphone.core.translator.UnifiedRole
 import com.cpaphone.engine.oauth.OAuthCallbackServer
 import com.cpaphone.engine.oauth.OAuthTokenClient
 import kotlinx.coroutines.CoroutineScope
@@ -116,6 +120,33 @@ class AntigravityOAuthSmokeTest {
                 println(">>> Antigravity 可用模型（${models.size} 个）:")
                 models.forEach { println("    - $it") }
                 assertTrue(models.isNotEmpty(), "模型聚合结果为空")
+
+                // ===== 真实上游推理验证（项目实际调用的 URL 与协议）=====
+                println(">>> [真实推理] POST https://cloudcode-pa.googleapis.com/v1internal:generateContent")
+                val antigravityClient = com.cpaphone.engine.client.AntigravityClient()
+                val projectId = antigravityClient.ensureProjectId("smoke-test", tokens.accessToken)
+                println(">>> 云码 project_id: $projectId")
+                assertTrue(projectId.isNotBlank(), "云码 project_id 为空")
+
+                val unified = UnifiedChatRequest(
+                    model = "gemini-3-flash",
+                    messages = listOf(
+                        UnifiedMessage(UnifiedRole.USER, listOf(UnifiedContentPart.Text("只回复两个字：成功")))
+                    ),
+                    isStreaming = false
+                )
+                val inference = antigravityClient.generateContent(
+                    accessToken = tokens.accessToken,
+                    projectId = projectId,
+                    model = "gemini-3-flash",
+                    unified = unified
+                )
+                println(">>> 推理返回内容: ${inference.contentText.take(120)}")
+                inference.reasoningText?.let { println(">>> 思考链（前 80 字）: ${it.take(80)}") }
+                println(">>> usage: prompt=${inference.promptTokens} completion=${inference.completionTokens} total=${inference.totalTokens}")
+                println(">>> OpenAI 规范输出: ${antigravityClient.toOpenAiCompletionJson(inference, "gemini-3-flash").take(220)}")
+                assertTrue(inference.contentText.isNotBlank(), "真实推理返回内容为空")
+                println(">>> 真实推理验证通过")
             }
         } finally {
             server.stop()
