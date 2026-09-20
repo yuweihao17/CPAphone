@@ -25,6 +25,16 @@ enum class ProviderType(val identifier: String, val displayName: String) {
 }
 
 /**
+ * 凭据的底层认证形式
+ */
+@Serializable
+enum class AuthType {
+    API_KEY,         // 原生 API 密钥
+    OAUTH,           // OAuth 2.0 访问令牌
+    SERVICE_ACCOUNT  // GCP / 云端服务账号 JSON
+}
+
+/**
  * 凭据的运行态生命周期状态
  */
 @Serializable
@@ -53,11 +63,14 @@ data class AuthCredential(
     val id: String,
     val alias: String,
     val provider: ProviderType,
+    val authType: AuthType = AuthType.API_KEY,
     val prefix: String = "",
     val weight: Int = 1,
     val status: CredentialStatus = CredentialStatus.ACTIVE,
     val statusMessage: String = "",
     val cooldownUntilTimestamp: Long = 0L,
+    val modelCooldowns: Map<String, Long> = emptyMap(), // 模型维度的局部冷却隔离
+    val expiresAt: Long = 0L,                            // OAuth Token 到期时间戳 (0 表示不过期或未知)
     val customBaseUrl: String? = null,
     val modelAliases: Map<String, String> = emptyMap(),
     val headers: Map<String, String> = emptyMap(),
@@ -67,7 +80,24 @@ data class AuthCredential(
     val lastErrorMessage: String? = null,
     val createdAt: Long = System.currentTimeMillis()
 ) {
+    /**
+     * 检查全局可用性及特定模型的局部冷却状态
+     */
+    fun isAvailableForModel(model: String? = null): Boolean {
+        val now = System.currentTimeMillis()
+        if (status != CredentialStatus.ACTIVE) return false
+        if (cooldownUntilTimestamp > now) return false
+        if (expiresAt > 0 && expiresAt <= now) return false
+
+        if (!model.isNullOrBlank()) {
+            val modelCooldown = modelCooldowns[model]
+            if (modelCooldown != null && modelCooldown > now) {
+                return false
+            }
+        }
+        return true
+    }
+
     val isAvailable: Boolean
-        get() = status == CredentialStatus.ACTIVE &&
-                (cooldownUntilTimestamp <= System.currentTimeMillis())
+        get() = isAvailableForModel(null)
 }
