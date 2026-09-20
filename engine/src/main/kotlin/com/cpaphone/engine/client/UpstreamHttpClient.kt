@@ -10,7 +10,9 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.charset.StandardCharsets
 
@@ -151,7 +153,7 @@ class UpstreamHttpClient(
      * 若正常，则返回拼接好的 ByteReadChannel 供下游零拷贝管道消费。
      */
     private suspend fun inspectStreamBootstrap(channel: ByteReadChannel): Pair<ByteReadChannel, String?> {
-        val firstLine = channel.readUTF8Line(limit = 4096) ?: return Pair(channel, null)
+        val firstLine = channel.readUTF8Line(maxSize = 4096) ?: return Pair(channel, null)
         val lower = firstLine.lowercase()
 
         val isHiddenError = lower.contains("server_is_overloaded") ||
@@ -168,13 +170,11 @@ class UpstreamHttpClient(
         val lineBytes = (firstLine + "\n").toByteArray(StandardCharsets.UTF_8)
         synthesizedChannel.writeFully(lineBytes, 0, lineBytes.size)
 
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).run {
-            kotlinx.coroutines.launch {
-                try {
-                    channel.copyTo(synthesizedChannel)
-                } finally {
-                    synthesizedChannel.close()
-                }
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                channel.copyTo(synthesizedChannel)
+            } finally {
+                synthesizedChannel.close()
             }
         }
 
@@ -182,8 +182,9 @@ class UpstreamHttpClient(
     }
 
     private fun resolveBaseUrl(credential: AuthCredential): String {
-        if (!credential.customBaseUrl.isNullOrBlank()) {
-            return credential.customBaseUrl
+        val customBaseUrl = credential.customBaseUrl
+        if (!customBaseUrl.isNullOrBlank()) {
+            return customBaseUrl
         }
         return when (credential.provider) {
             ProviderType.CLAUDE -> "https://api.anthropic.com"
