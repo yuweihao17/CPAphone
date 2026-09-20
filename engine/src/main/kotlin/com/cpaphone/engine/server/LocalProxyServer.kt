@@ -21,6 +21,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -306,47 +307,67 @@ class LocalProxyServer(
             coordinator.reportSuccess(credential.id)
 
             if (parsedRequest.isStreaming) {
-                // 真流式：上游 streamGenerateContent?alt=sse → 剥 response 壳 → GeminiToOpenAi 逐帧转译
-                val upstreamChannel = antigravityClient.streamGenerateContent(
-                    accessToken = accessToken,
-                    projectId = projectId,
-                    model = parsedRequest.model,
-                    unified = parsedRequest
-                )
-                val converter = SseStreamConverter.GeminiToOpenAi(parsedRequest.model)
+                // 真流式：上游 preparePost streamGenerateContent?alt=sse → 零缓冲实时通道 → GeminiToOpenAi 逐帧转译
                 call.response.status(HttpStatusCode.OK)
                 call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
                 call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                call.response.headers.append(HttpHeaders.Connection, "keep-alive")
+                call.response.headers.append("X-Accel-Buffering", "no")
                 call.response.headers.append("X-Cpa-Trace-Id", traceId)
                 call.respondBytesWriter {
-                    while (!upstreamChannel.isClosedForRead) {
-                        val line = upstreamChannel.readUTF8Line() ?: break
-                        val payload = SseStreamConverter.dataPayloadOf(line) ?: continue
-                        // Antigravity 帧：{"response":{candidates...},"traceId":...}，剥壳取 response 节点
-                        val responseNode = try {
-                            kotlinx.serialization.json.Json.parseToJsonElement(payload)
-                                .jsonObject["response"] as? JsonObject
-                        } catch (_: Exception) {
-                            null
-                        } ?: continue
-                        // 空信封心跳帧 {"response":{}} 跳过
-                        if (responseNode.isEmpty()) continue
-                        val translated = converter.convert(responseNode.toString())
-                        if (translated != null) {
-                            val bytes = translated.toByteArray(StandardCharsets.UTF_8)
+                    val converter = SseStreamConverter.GeminiToOpenAi(parsedRequest.model)
+                    // 启动心跳保活定时器（对齐 CLIProxyAPI ForwardStream 15s 保活，防止长思考/工具调用时网关或代理断流）
+                    val keepAliveJob = CoroutineScope(coroutineContext).launch {
+                        while (isActive) {
+                            delay(15_000)
+                            try {
+                                val ping = ": keep-alive\n\n".toByteArray(StandardCharsets.UTF_8)
+                                writeFully(ping, 0, ping.size)
+                                flush()
+                            } catch (_: Exception) {
+                                break
+                            }
+                        }
+                    }
+                    try {
+                        antigravityClient.streamGenerateContent(
+                            accessToken = accessToken,
+                            projectId = projectId,
+                            model = parsedRequest.model,
+                            unified = parsedRequest
+                        ) { upstreamChannel ->
+                            while (!upstreamChannel.isClosedForRead) {
+                                val line = upstreamChannel.readUTF8Line() ?: break
+                                val payload = SseStreamConverter.dataPayloadOf(line) ?: continue
+                                // Antigravity 帧：{"response":{candidates...},"traceId":...}，剥壳取 response 节点
+                                val responseNode = try {
+                                    kotlinx.serialization.json.Json.parseToJsonElement(payload)
+                                        .jsonObject["response"] as? JsonObject
+                                } catch (_: Exception) {
+                                    null
+                                } ?: continue
+                                // 空信封心跳帧 {"response":{}} 跳过
+                                if (responseNode.isEmpty()) continue
+                                val translated = converter.convert(responseNode.toString())
+                                if (translated != null) {
+                                    val bytes = translated.toByteArray(StandardCharsets.UTF_8)
+                                    writeFully(bytes, 0, bytes.size)
+                                    flush()
+                                }
+                            }
+                        }
+                        // 上游无 [DONE]：连接关闭后由转换器合成终帧，再补 [DONE]
+                        converter.flushTail()?.let { tail ->
+                            val bytes = tail.toByteArray(StandardCharsets.UTF_8)
                             writeFully(bytes, 0, bytes.size)
                             flush()
                         }
-                    }
-                    // 上游无 [DONE]：连接关闭后由转换器合成终帧，再补 [DONE]
-                    converter.flushTail()?.let { tail ->
-                        val bytes = tail.toByteArray(StandardCharsets.UTF_8)
-                        writeFully(bytes, 0, bytes.size)
+                        val done = "data: [DONE]\n\n".toByteArray(StandardCharsets.UTF_8)
+                        writeFully(done, 0, done.size)
                         flush()
+                    } finally {
+                        keepAliveJob.cancel()
                     }
-                    val done = "data: [DONE]\n\n".toByteArray(StandardCharsets.UTF_8)
-                    writeFully(done, 0, done.size)
-                    flush()
                 }
                 recordTrace(
                     traceId = traceId,
@@ -663,6 +684,8 @@ class LocalProxyServer(
                     call.response.status(finalResult.statusCode)
                     call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
                     call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                    call.response.headers.append(HttpHeaders.Connection, "keep-alive")
+                    call.response.headers.append("X-Accel-Buffering", "no")
                     call.response.headers.append("X-Cpa-Trace-Id", traceId)
                     call.respondBytesWriter { finalResult.responseChannel.copyTo(this) }
                 }
@@ -682,22 +705,40 @@ class LocalProxyServer(
                     call.response.status(finalResult.statusCode)
                     call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
                     call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                    call.response.headers.append(HttpHeaders.Connection, "keep-alive")
+                    call.response.headers.append("X-Accel-Buffering", "no")
                     call.response.headers.append("X-Cpa-Trace-Id", traceId)
                     call.respondBytesWriter {
-                        while (!finalResult.responseChannel.isClosedForRead) {
-                            val line = finalResult.responseChannel.readUTF8Line() ?: break
-                            val payload = SseStreamConverter.dataPayloadOf(line) ?: continue
-                            val translated = converter.convert(payload)
-                            if (translated != null) {
-                                val bytes = translated.toByteArray(StandardCharsets.UTF_8)
+                        val keepAliveJob = CoroutineScope(coroutineContext).launch {
+                            while (isActive) {
+                                delay(15_000)
+                                try {
+                                    val ping = ": keep-alive\n\n".toByteArray(StandardCharsets.UTF_8)
+                                    writeFully(ping, 0, ping.size)
+                                    flush()
+                                } catch (_: Exception) {
+                                    break
+                                }
+                            }
+                        }
+                        try {
+                            while (!finalResult.responseChannel.isClosedForRead) {
+                                val line = finalResult.responseChannel.readUTF8Line() ?: break
+                                val payload = SseStreamConverter.dataPayloadOf(line) ?: continue
+                                val translated = converter.convert(payload)
+                                if (translated != null) {
+                                    val bytes = translated.toByteArray(StandardCharsets.UTF_8)
+                                    writeFully(bytes, 0, bytes.size)
+                                    flush()
+                                }
+                            }
+                            converter.flushTail()?.let { tail ->
+                                val bytes = tail.toByteArray(StandardCharsets.UTF_8)
                                 writeFully(bytes, 0, bytes.size)
                                 flush()
                             }
-                        }
-                        converter.flushTail()?.let { tail ->
-                            val bytes = tail.toByteArray(StandardCharsets.UTF_8)
-                            writeFully(bytes, 0, bytes.size)
-                            flush()
+                        } finally {
+                            keepAliveJob.cancel()
                         }
                     }
                 }

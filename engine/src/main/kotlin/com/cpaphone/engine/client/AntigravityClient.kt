@@ -8,6 +8,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
@@ -151,27 +152,31 @@ class AntigravityClient {
     }
 
     /**
-     * 发起云码真流式推理（对齐 CLIProxyAPI ExecuteStream）
+     * 发起云码真流式推理（对齐 CLIProxyAPI ExecuteStream，全链路零缓冲边读边下发）
      * POST /v1internal:streamGenerateContent?alt=sse，请求体与非流式完全相同。
-     * 返回上游 SSE 字节流：帧格式 data: {"response":{candidates...},"traceId":...}，无 [DONE]，连接关闭即结束。
+     * 采用 preparePost 保持底层 HTTP 连接为实时流通道，避免 client.post 全量缓冲入内存导致一次性爆发输出。
+     * 上游 SSE 字节流帧格式：data: {"response":{candidates...},"traceId":...}，无 [DONE]，连接关闭即结束。
      */
-    suspend fun streamGenerateContent(
+    suspend fun <T> streamGenerateContent(
         accessToken: String,
         projectId: String,
         model: String,
-        unified: UnifiedChatRequest
-    ): io.ktor.utils.io.ByteReadChannel {
-        val response = client.post("$INFERENCE_BASE/v1internal:streamGenerateContent?alt=sse") {
+        unified: UnifiedChatRequest,
+        block: suspend (io.ktor.utils.io.ByteReadChannel) -> T
+    ): T {
+        val statement = client.preparePost("$INFERENCE_BASE/v1internal:streamGenerateContent?alt=sse") {
             header(HttpHeaders.Authorization, "Bearer $accessToken")
             header(HttpHeaders.UserAgent, USER_AGENT)
             contentType(ContentType.Application.Json)
             setBody(buildRequestEnvelope(projectId, model, unified).toString())
         }
-        if (!response.status.isSuccess()) {
-            val text = response.bodyAsText()
-            throw AntigravityInferenceException("云码流式推理失败 HTTP ${response.status.value}: ${text.take(300)}")
+        return statement.execute { response ->
+            if (!response.status.isSuccess()) {
+                val text = response.bodyAsText()
+                throw AntigravityInferenceException("云码流式推理失败 HTTP ${response.status.value}: ${text.take(300)}")
+            }
+            block(response.bodyAsChannel())
         }
-        return response.bodyAsChannel()
     }
 
     /**

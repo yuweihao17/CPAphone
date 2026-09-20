@@ -41,9 +41,10 @@ class DataPersistenceMappingTest {
 
     @Test
     fun testDomainAndEntityMappingBidirectional() {
+        val now = System.currentTimeMillis()
         val modelCooldowns = mapOf(
-            "claude-3-7-sonnet" to 1726830000000L,
-            "claude-3-5-sonnet" to 1726831000000L
+            "claude-3-7-sonnet" to now + 3600_000L,
+            "claude-3-5-sonnet" to now + 7200_000L
         )
         val modelAliases = mapOf(
             "gpt-4" to "claude-3-5-sonnet",
@@ -64,7 +65,7 @@ class DataPersistenceMappingTest {
             statusMessage = "All systems operational",
             cooldownUntilTimestamp = 0L,
             modelCooldowns = modelCooldowns,
-            expiresAt = 1750000000000L,
+            expiresAt = now + 86400_000L,
             customBaseUrl = "https://custom.anthropic.proxy",
             modelAliases = modelAliases,
             headers = headers,
@@ -101,7 +102,7 @@ class DataPersistenceMappingTest {
         // 验证 Entity 字段
         assertEquals("test-cred-01", entity.id)
         assertEquals(AuthType.OAUTH, entity.authType)
-        assertEquals(1750000000000L, entity.expiresAt)
+        assertEquals(domainCred.expiresAt, entity.expiresAt)
         assertTrue(entity.modelCooldownsJson.contains("claude-3-7-sonnet"))
         assertTrue(entity.modelAliasesJson.contains("gpt-4"))
 

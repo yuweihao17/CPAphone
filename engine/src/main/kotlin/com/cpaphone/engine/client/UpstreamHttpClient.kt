@@ -10,8 +10,8 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,32 +82,52 @@ class UpstreamHttpClient(
                 enableCloak = enableCloaking
             )
 
-            val response = client.request(fullUrl) {
-                this.method = method
-                setBody(requestBody)
-                contentType(ContentType.Application.Json)
+            if (isStreaming) {
+                // 流式请求：使用 prepareRequest 避免 client.request 在内存全量缓冲 Response Body
+                // 通过 ByteChannel 实时管道将上游分节以零延迟泵送至下游
+                val statement = client.prepareRequest(fullUrl) {
+                    this.method = method
+                    setBody(requestBody)
+                    contentType(ContentType.Application.Json)
 
-                // 注入官方鉴权头
-                injectAuthHeaders(this, credential.provider, secretKey)
+                    // 注入官方鉴权头
+                    injectAuthHeaders(this, credential.provider, secretKey)
 
-                // 注入规范化 Header
-                cloakedHeaders.forEach { (k, v) ->
-                    if (!k.equals("Authorization", ignoreCase = true) &&
-                        !k.equals("Host", ignoreCase = true) &&
-                        !k.equals("Content-Length", ignoreCase = true)
-                    ) {
-                        header(k, v)
+                    // 注入规范化 Header
+                    cloakedHeaders.forEach { (k, v) ->
+                        if (!k.equals("Authorization", ignoreCase = true) &&
+                            !k.equals("Host", ignoreCase = true) &&
+                            !k.equals("Content-Length", ignoreCase = true)
+                        ) {
+                            header(k, v)
+                        }
                     }
                 }
-            }
 
-            if (response.status.isSuccess()) {
-                val rawChannel = response.bodyAsChannel()
+                val pipe = ByteChannel(autoFlush = true)
+                val deferredResponse = CompletableDeferred<HttpResponse>()
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        statement.execute { response ->
+                            deferredResponse.complete(response)
+                            if (response.status.isSuccess()) {
+                                response.bodyAsChannel().copyTo(pipe)
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        if (!deferredResponse.isCompleted) {
+                            deferredResponse.completeExceptionally(e)
+                        }
+                        pipe.close(e)
+                    } finally {
+                        pipe.close()
+                    }
+                }
 
-                // 2. 若为流式传输，执行首包缓冲探测 (Stream Bootstrap Buffering)
-                // 拦截上游在 HTTP 200 流建立后立即吐出的 server_is_overloaded / quota_exceeded 伪成功错误
-                if (isStreaming) {
-                    val (inspectedChannel, hiddenError) = inspectStreamBootstrap(rawChannel)
+                val response = deferredResponse.await()
+                if (response.status.isSuccess()) {
+                    // 2. 执行首包缓冲探测 (Stream Bootstrap Buffering)
+                    val (inspectedChannel, hiddenError) = inspectStreamBootstrap(pipe)
                     if (hiddenError != null) {
                         return@withContext UpstreamCallResult.Error(
                             statusCode = HttpStatusCode.ServiceUnavailable,
@@ -122,22 +142,54 @@ class UpstreamHttpClient(
                         isStreaming = true
                     )
                 } else {
+                    val errorBody = response.bodyAsText()
+                    val code = response.status.value
+                    val isRetryable = code == 429 || code in 500..599 || code == 408
+                    UpstreamCallResult.Error(
+                        statusCode = response.status,
+                        errorBody = errorBody,
+                        isRetryable = isRetryable
+                    )
+                }
+            } else {
+                // 非流式请求：使用普通 client.request
+                val response = client.request(fullUrl) {
+                    this.method = method
+                    setBody(requestBody)
+                    contentType(ContentType.Application.Json)
+
+                    // 注入官方鉴权头
+                    injectAuthHeaders(this, credential.provider, secretKey)
+
+                    // 注入规范化 Header
+                    cloakedHeaders.forEach { (k, v) ->
+                        if (!k.equals("Authorization", ignoreCase = true) &&
+                            !k.equals("Host", ignoreCase = true) &&
+                            !k.equals("Content-Length", ignoreCase = true)
+                        ) {
+                            header(k, v)
+                        }
+                    }
+                }
+
+                if (response.status.isSuccess()) {
+                    val rawChannel = response.bodyAsChannel()
                     UpstreamCallResult.Success(
                         statusCode = response.status,
                         headers = response.headers,
                         responseChannel = rawChannel,
                         isStreaming = false
                     )
+                } else {
+                    val errorBody = response.bodyAsText()
+                    val code = response.status.value
+                    val isRetryable = code == 429 || code in 500..599 || code == 408
+                    UpstreamCallResult.Error(
+                        statusCode = response.status,
+                        errorBody = errorBody,
+                        isRetryable = isRetryable
+                    )
                 }
-            } else {
-                val errorBody = response.bodyAsText()
-                val code = response.status.value
-                val isRetryable = code == 429 || code in 500..599 || code == 408
-                UpstreamCallResult.Error(
-                    statusCode = response.status,
-                    errorBody = errorBody,
-                    isRetryable = isRetryable
-                )
             }
         } catch (e: Exception) {
             UpstreamCallResult.Error(
