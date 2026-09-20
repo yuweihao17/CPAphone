@@ -46,7 +46,11 @@ class CpaApplication : Application() {
         appConfigRepository = AppConfigRepository(this)
 
         coordinator = CredentialCoordinator(credentialRepository)
-        localProxyServer = LocalProxyServer(coordinator, database.traceLogDao())
+        localProxyServer = LocalProxyServer(
+            coordinator = coordinator,
+            traceLogDao = database.traceLogDao(),
+            credentialRepository = credentialRepository
+        )
         remoteClient = RemoteManagementClient("http://127.0.0.1:8317", "")
         nsdDiscoveryManager = NsdDiscoveryManager(this)
         nativePluginHost = NativePluginHost(this)

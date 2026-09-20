@@ -43,9 +43,15 @@ interface ProxyServerStateListener {
 class LocalProxyServer(
     private val coordinator: CredentialCoordinator,
     private val traceLogDao: TraceLogDao,
+    private val credentialRepository: com.cpaphone.data.repository.CredentialRepository? = null,
     private val upstreamClient: UpstreamHttpClient = UpstreamHttpClient(),
     val realtimeRelayManager: RealtimeRelayManager = RealtimeRelayManager(coordinator)
 ) {
+    private val managementHandler = ManagementRouteHandler(
+        coordinator = coordinator,
+        credentialRepository = credentialRepository ?: createFallbackRepo(),
+        traceLogDao = traceLogDao
+    )
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private val isRunning = AtomicBoolean(false)
     private val totalRequestsCount = AtomicLong(0)
@@ -145,6 +151,11 @@ class LocalProxyServer(
                 post("/v1/realtime/calls/{call_id}/hangup") {
                     handleHangupCall(call)
                 }
+
+                // =========================================================================
+                // 完整管理平面路由组 (/v0/management/...)
+                // =========================================================================
+                managementHandler.register(this)
             }
         }
 
@@ -480,6 +491,19 @@ class LocalProxyServer(
             if (totalRequestsCount.get() % 20L == 0L) {
                 traceLogDao.pruneOldLogs()
             }
+        }
+    }
+
+    private companion object {
+        fun createFallbackRepo(): com.cpaphone.data.repository.CredentialRepository {
+            val dummyContext = java.lang.reflect.Proxy.newProxyInstance(
+                com.cpaphone.data.repository.CredentialRepository::class.java.classLoader,
+                arrayOf(android.content.Context::class.java)
+            ) { _, _, _ -> null } as android.content.Context
+            return com.cpaphone.data.repository.CredentialRepository(
+                dao = com.cpaphone.data.local.CpaDatabase.getInstance(dummyContext).credentialDao(),
+                secureStorage = com.cpaphone.data.security.SecureCredentialStorage(dummyContext)
+            )
         }
     }
 }
