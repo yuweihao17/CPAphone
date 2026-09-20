@@ -105,7 +105,7 @@ class OAuthSessionManager {
         provider: ProviderType,
         spec: OAuthProviderSpec,
         state: String,
-        verifier: String
+        verifier: String?
     ): String {
         val base = spec.authorizeUrl ?: return "https://oauth.example.com/authorize?state=$state"
         val params = buildList {
