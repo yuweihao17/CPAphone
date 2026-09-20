@@ -113,7 +113,7 @@ class OAuthSessionManager {
             add("response_type=code")
             add("redirect_uri=${enc(spec.redirectUri ?: "")}")
             spec.scope?.let { add("scope=${enc(it)}") }
-            if (spec.flowKind == OAuthFlowKind.CODE_PKCE) {
+            if (spec.flowKind == OAuthFlowKind.CODE_PKCE && verifier != null) {
                 add("code_challenge=${enc(Pkce.generateChallenge(verifier))}")
                 add("code_challenge_method=S256")
             }
