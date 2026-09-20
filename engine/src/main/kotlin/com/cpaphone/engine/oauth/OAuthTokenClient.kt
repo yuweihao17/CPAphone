@@ -283,8 +283,11 @@ class OAuthTokenClient(
         val obj = try { json.parseToJsonElement(text).jsonObject } catch (_: Exception) { null }
         if (!response.status.isSuccess()) {
             val error = obj?.str("error")
+            val description = obj?.str("error_description")
+            // error_description 承载根因（如 Code was already redeemed / Malformed auth code），完整透出
+            val detail = listOfNotNull(error, description).joinToString(": ")
             throw OAuthTokenException(
-                "$action failed: HTTP ${response.status.value}${error?.let { " ($it)" } ?: ""} ${if (text.length > 200) "..." else text.take(200)}",
+                "$action failed: HTTP ${response.status.value}${if (detail.isNotBlank()) " ($detail)" else ""} ${text.take(400)}",
                 error
             )
         }

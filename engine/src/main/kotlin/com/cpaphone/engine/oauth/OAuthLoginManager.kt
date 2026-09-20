@@ -61,6 +61,15 @@ class OAuthLoginManager(
                         }
                     }
                 }
+                // 超时兜底：5 分钟未完成授权自动结束会话并释放回调端口
+                backgroundScope.launch {
+                    kotlinx.coroutines.delay(5 * 60_000L)
+                    val pending = sessionManager.peek(session.state)
+                    if (pending != null && pending.status == com.cpaphone.core.session.OAuthFlowStatus.WAIT) {
+                        sessionManager.failSession(session.state, "授权超时，请重新发起登录")
+                        callbackServer.stop()
+                    }
+                }
                 LoginStartResult(
                     state = session.state,
                     flowKind = spec.flowKind,

@@ -109,12 +109,13 @@ fun AuthPoolScreen() {
             )
             Spacer(modifier = Modifier.height(8.dp))
             OAUTH_LOGIN_CARDS.forEach { card ->
-                val activeSession = oauthSessions.firstOrNull {
-                    it.provider == card.provider && it.status == OAuthFlowStatus.WAIT
-                }
+                val related = oauthSessions.filter { it.provider == card.provider }
+                val activeSession = related.firstOrNull { it.status == OAuthFlowStatus.WAIT }
+                val lastResult = related.firstOrNull { it.status != OAuthFlowStatus.WAIT }
                 OAuthLoginCardItem(
                     card = card,
                     activeSession = activeSession,
+                    lastResult = lastResult,
                     onStart = {
                         scope.launch {
                             try {
@@ -241,6 +242,7 @@ private val OAUTH_LOGIN_CARDS = listOf(
 private fun OAuthLoginCardItem(
     card: OAuthLoginCard,
     activeSession: OAuthSession?,
+    lastResult: OAuthSession?,
     onStart: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -297,6 +299,35 @@ private fun OAuthLoginCardItem(
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
             )
+
+            // 最近一次登录结果内联展示：错误根因（含服务商 error_description）不再被 Toast 截断
+            if (activeSession == null && lastResult != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = when (lastResult.status) {
+                        OAuthFlowStatus.ERROR -> AccentError.copy(alpha = 0.10f)
+                        else -> AccentSecondary.copy(alpha = 0.10f)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = when (lastResult.status) {
+                            OAuthFlowStatus.ERROR -> "登录失败：${lastResult.errorMessage ?: "未知错误"}"
+                            else -> buildString {
+                                append("登录成功：${lastResult.resultAlias ?: "凭据已保存"}")
+                                lastResult.resultEmail?.let { append("（$it）") }
+                            }
+                        },
+                        fontSize = 11.sp,
+                        color = when (lastResult.status) {
+                            OAuthFlowStatus.ERROR -> AccentError
+                            else -> AccentSecondary
+                        },
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
 
             // 设备码流进行中：展示 user_code 与验证页辅助操作
             val userCode = activeSession?.userCode

@@ -20,7 +20,7 @@ class OAuthCallbackServer(
     private val hostScope: CoroutineScope
 ) {
     private var server: EmbeddedServer<io.ktor.server.cio.CIOApplicationEngine, io.ktor.server.cio.CIOApplicationEngine.Configuration>? = null
-    private val activePort = java.util.concurrent.atomic.AtomicInteger(0)
+    private val codeConsumed = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
      * 启动（或重启）回调监听
@@ -28,6 +28,7 @@ class OAuthCallbackServer(
      */
     fun start(port: Int, onCallback: (code: String?, state: String?, error: String?) -> Unit) {
         stop()
+        codeConsumed.set(false)
         server = embeddedServer(CIO, port = port, host = "127.0.0.1") {
             routing {
                 // 提供商回跳路径不固定（/callback、/auth/callback、/oauth-callback），通配捕获
@@ -39,8 +40,12 @@ class OAuthCallbackServer(
                     try {
                         call.respondText(SUCCESS_HTML, ContentType.Text.Html)
                     } finally {
-                        activePort.set(port)
-                        this@OAuthCallbackServer.launchSafe { onCallback(code, state, error) }
+                        // 浏览器可能对回跳 URL 发起重复请求（重试/预取/favicon 之外的二次加载），
+                        // 授权码一次性，重复兑换必然 invalid_grant 并覆盖首次结果，这里保证仅首次兑换生效
+                        val isFirstValidCode = !code.isNullOrBlank() && codeConsumed.compareAndSet(false, true)
+                        if (isFirstValidCode) {
+                            this@OAuthCallbackServer.launchSafe { onCallback(code, state, error) }
+                        }
                     }
                 }
             }
@@ -54,7 +59,7 @@ class OAuthCallbackServer(
             // 端口已释放或未启动，忽略
         }
         server = null
-        activePort.set(0)
+        codeConsumed.set(false)
     }
 
     private fun launchSafe(block: suspend () -> Unit) {
