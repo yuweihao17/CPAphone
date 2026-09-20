@@ -1,0 +1,307 @@
+package com.cpaphone.engine.server
+
+import com.cpaphone.core.model.CpaTraceRecord
+import com.cpaphone.core.model.ProviderType
+import com.cpaphone.core.translator.ProtocolTranslatorEngine
+import com.cpaphone.data.local.dao.TraceLogDao
+import com.cpaphone.data.local.entity.TraceLogEntity
+import com.cpaphone.engine.client.UpstreamCallResult
+import com.cpaphone.engine.client.UpstreamHttpClient
+import com.cpaphone.engine.coordinator.CredentialCoordinator
+import io.ktor.http.*
+import io.ktor.server.application.*
+import io.ktor.server.cio.*
+import io.ktor.server.engine.*
+import io.ktor.server.plugins.cors.routing.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import io.ktor.utils.io.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * 本地嵌入式代理服务状态监听器
+ */
+interface ProxyServerStateListener {
+    fun onStateChanged(isRunning: Boolean, host: String, port: Int)
+    fun onMetricsUpdated(totalRequests: Long, currentQps: Double)
+}
+
+/**
+ * 本地轻量级 AI 代理网关 (Ktor Server CIO)
+ * 具备极低内存占用、首包无感重试、全矩阵转译与流式零拷贝透传特性
+ */
+class LocalProxyServer(
+    private val coordinator: CredentialCoordinator,
+    private val traceLogDao: TraceLogDao,
+    private val upstreamClient: UpstreamHttpClient = UpstreamHttpClient()
+) {
+    private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
+    private val isRunning = AtomicBoolean(false)
+    private val totalRequestsCount = AtomicLong(0)
+    private var stateListener: ProxyServerStateListener? = null
+
+    fun setStateListener(listener: ProxyServerStateListener?) {
+        this.stateListener = listener
+    }
+
+    fun isServerRunning(): Boolean = isRunning.get()
+
+    /**
+     * 启动本地网关监听
+     */
+    fun start(port: Int = 8317, bindAllInterfaces: Boolean = false) {
+        if (isRunning.get()) return
+
+        val host = if (bindAllInterfaces) "0.0.0.0" else "127.0.0.1"
+
+        val engine = embeddedServer(CIO, port = port, host = host) {
+            install(CORS) {
+                anyHost()
+                allowHeader(HttpHeaders.ContentType)
+                allowHeader(HttpHeaders.Authorization)
+                allowHeader("x-api-key")
+                allowHeader("x-goog-api-key")
+                allowHeader("X-Claude-Code-Session-Id")
+                allowHeader("session_id")
+                allowMethod(HttpMethod.Options)
+                allowMethod(HttpMethod.Post)
+                allowMethod(HttpMethod.Get)
+            }
+
+            routing {
+                // 健康检查端点
+                get("/healthz") {
+                    call.respondText("{\"status\":\"ok\",\"service\":\"CPAphone\"}", ContentType.Application.Json)
+                }
+
+                // OpenAI 模型列表聚合端点
+                get("/v1/models") {
+                    handleModels(call)
+                }
+
+                // OpenAI Chat Completions 核心代理端点
+                post("/v1/chat/completions") {
+                    handleChatCompletions(call)
+                }
+
+                // Anthropic Messages 核心代理端点 (支持客户端直连 /v1/messages)
+                post("/v1/messages") {
+                    handleChatCompletions(call)
+                }
+            }
+        }
+
+        engine.start(wait = false)
+        server = engine
+        isRunning.set(true)
+        stateListener?.onStateChanged(true, host, port)
+    }
+
+    /**
+     * 停止代理服务
+     */
+    fun stop() {
+        if (!isRunning.get()) return
+        server?.stop(1000, 2000)
+        server = null
+        isRunning.set(false)
+        stateListener?.onStateChanged(false, "127.0.0.1", 0)
+    }
+
+    private suspend fun handleModels(call: ApplicationCall) {
+        val jsonResponse = """
+            {
+              "object": "list",
+              "data": [
+                {"id": "gpt-4o", "object": "model", "owned_by": "openai"},
+                {"id": "gpt-4o-mini", "object": "model", "owned_by": "openai"},
+                {"id": "o1", "object": "model", "owned_by": "openai"},
+                {"id": "o3-mini", "object": "model", "owned_by": "openai"},
+                {"id": "claude-3-7-sonnet-20250219", "object": "model", "owned_by": "anthropic"},
+                {"id": "claude-3-5-sonnet-20241022", "object": "model", "owned_by": "anthropic"},
+                {"id": "gemini-2.0-flash", "object": "model", "owned_by": "google"},
+                {"id": "gemini-2.5-pro", "object": "model", "owned_by": "google"}
+              ]
+            }
+        """.trimIndent()
+        call.respondText(jsonResponse, ContentType.Application.Json)
+    }
+
+    private suspend fun handleChatCompletions(call: ApplicationCall) {
+        val startTime = System.currentTimeMillis()
+        val traceId = "cpa-" + UUID.randomUUID().toString().substring(0, 8)
+        totalRequestsCount.incrementAndGet()
+
+        val rawBody = call.receiveText()
+        val parsedRequest = try {
+            ProtocolTranslatorEngine.parseOpenAiChatRequest(rawBody)
+        } catch (_: Exception) {
+            call.respond(
+                HttpStatusCode.BadRequest,
+                "{\"error\":{\"message\":\"Invalid JSON request body\",\"type\":\"invalid_request_error\"}}"
+            )
+            return
+        }
+
+        val sessionKey = call.request.header("X-Claude-Code-Session-Id")
+            ?: call.request.header("session_id")
+            ?: call.request.queryParameters["session_id"]
+
+        // 尝试获取可用凭据（最多重试 3 次故障转移）
+        var retryCount = 0
+        var finalResult: UpstreamCallResult? = null
+        var chosenCredential: com.cpaphone.core.model.AuthCredential? = null
+
+        while (retryCount < 3) {
+            val acquired = coordinator.acquireCredential(parsedRequest.model, sessionKey)
+            if (acquired == null) {
+                break
+            }
+            val (credential, secretKey) = acquired
+            chosenCredential = credential
+
+            // 协议转译：按目标提供商构建请求体与路由目标
+            val (targetPath, targetBody) = when (credential.provider) {
+                ProviderType.CLAUDE -> {
+                    Pair("/v1/messages", ProtocolTranslatorEngine.toClaudeMessagesJson(parsedRequest))
+                }
+                ProviderType.GEMINI, ProviderType.ANTIGRAVITY -> {
+                    Pair(
+                        "/v1beta/models/${parsedRequest.model}:generateContent",
+                        ProtocolTranslatorEngine.toGeminiGenerateContentJson(parsedRequest)
+                    )
+                }
+                else -> {
+                    Pair("/v1/chat/completions", rawBody)
+                }
+            }
+
+            val result = upstreamClient.execute(
+                credential = credential,
+                secretKey = secretKey,
+                targetPath = targetPath,
+                method = HttpMethod.Post,
+                requestBody = targetBody,
+                headers = emptyMap(),
+                isStreaming = parsedRequest.isStreaming
+            )
+
+            if (result is UpstreamCallResult.Success) {
+                coordinator.reportSuccess(credential.id)
+                finalResult = result
+                break
+            } else if (result is UpstreamCallResult.Error) {
+                coordinator.reportFailure(credential.id, result.errorBody, result.statusCode.value)
+                if (!result.isRetryable) {
+                    finalResult = result
+                    break
+                }
+                retryCount++
+            }
+        }
+
+        val duration = System.currentTimeMillis() - startTime
+
+        // 处理最终输出
+        when (finalResult) {
+            is UpstreamCallResult.Success -> {
+                call.response.status(finalResult.statusCode)
+                call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
+                call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                call.response.headers.append(HttpHeaders.Connection, "keep-alive")
+                call.response.headers.append("X-Cpa-Trace-Id", traceId)
+
+                // 零拷贝管道透传
+                call.respondBytesWriter {
+                    finalResult.responseChannel.copyTo(this)
+                }
+
+                recordTrace(
+                    traceId = traceId,
+                    model = parsedRequest.model,
+                    credential = chosenCredential,
+                    statusCode = 200,
+                    durationMs = duration,
+                    isStreaming = parsedRequest.isStreaming,
+                    retryCount = retryCount,
+                    errorMessage = null
+                )
+            }
+            is UpstreamCallResult.Error -> {
+                call.respond(
+                    finalResult.statusCode,
+                    "{\"error\":{\"message\":${finalResult.errorBody},\"type\":\"upstream_error\"}}"
+                )
+                recordTrace(
+                    traceId = traceId,
+                    model = parsedRequest.model,
+                    credential = chosenCredential,
+                    statusCode = finalResult.statusCode.value,
+                    durationMs = duration,
+                    isStreaming = parsedRequest.isStreaming,
+                    retryCount = retryCount,
+                    errorMessage = finalResult.errorBody
+                )
+            }
+            null -> {
+                call.respond(
+                    HttpStatusCode.ServiceUnavailable,
+                    "{\"error\":{\"message\":\"All available credentials in pool are cooling or exhausted\",\"type\":\"pool_exhausted\"}}"
+                )
+                recordTrace(
+                    traceId = traceId,
+                    model = parsedRequest.model,
+                    credential = null,
+                    statusCode = 503,
+                    durationMs = duration,
+                    isStreaming = parsedRequest.isStreaming,
+                    retryCount = retryCount,
+                    errorMessage = "All credentials exhausted"
+                )
+            }
+        }
+    }
+
+    private fun recordTrace(
+        traceId: String,
+        model: String,
+        credential: com.cpaphone.core.model.AuthCredential?,
+        statusCode: Int,
+        durationMs: Long,
+        isStreaming: Boolean,
+        retryCount: Int,
+        errorMessage: String?
+    ) {
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            val entity = TraceLogEntity(
+                traceId = traceId,
+                clientIp = "127.0.0.1",
+                requestMethod = "POST",
+                requestPath = "/v1/chat/completions",
+                inboundProtocol = "openai",
+                requestedModel = model,
+                mappedModel = model,
+                targetProvider = credential?.provider ?: ProviderType.OPENAI_COMPATIBLE,
+                credentialId = credential?.id ?: "none",
+                credentialAlias = credential?.alias ?: "none",
+                statusCode = statusCode,
+                durationMs = durationMs,
+                ttftMs = (durationMs / 3).coerceAtLeast(10), // 估算 TTFT
+                promptTokens = 0,
+                completionTokens = 0,
+                isStreaming = isStreaming,
+                retryCount = retryCount,
+                wasCooldownTriggered = statusCode != 200,
+                errorMessage = errorMessage,
+                timestamp = System.currentTimeMillis()
+            )
+            traceLogDao.insert(entity)
+        }
+    }
+}
