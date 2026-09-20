@@ -40,7 +40,7 @@ class OAuthCallbackServer(
                         call.respondText(SUCCESS_HTML, ContentType.Text.Html)
                     } finally {
                         activePort.set(port)
-                        hostScope.launchSafe { onCallback(code, state, error) }
+                        this@OAuthCallbackServer.launchSafe { onCallback(code, state, error) }
                     }
                 }
             }
