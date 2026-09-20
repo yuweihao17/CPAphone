@@ -580,7 +580,8 @@ object ProtocolTranslatorEngine {
                                 addJsonObject {
                                     put("name", tool.name)
                                     if (tool.description.isNotBlank()) put("description", tool.description)
-                                    put("parameters", tool.parametersSchemaJson)
+                                    // MCP/OpenAI schema 含上游 proto 不认识的扩展字段，透传前清洗
+                                    put("parameters", GeminiSchemaCleaner.clean(tool.parametersSchemaJson))
                                 }
                             }
                         }

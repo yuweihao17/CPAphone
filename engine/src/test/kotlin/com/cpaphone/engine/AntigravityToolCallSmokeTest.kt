@@ -55,7 +55,7 @@ class AntigravityToolCallSmokeTest {
     }
 
     private suspend fun verifyToolCallInference(accessToken: String, refreshToken: String?) {
-        // 模拟外部 AI 客户端（dd）的请求形态：用户要求搜索新闻 + 客户端自带 web_search 工具
+        // 模拟外部 AI 客户端（dd）的请求形态：MCP 工具集（含 x-mcp-header 扩展字段）+ 搜索请求
         val openAiRequest = """
             {
               "model": "gemini-3-flash",
@@ -64,12 +64,22 @@ class AntigravityToolCallSmokeTest {
               "tools": [{
                 "type": "function",
                 "function": {
-                  "name": "web_search",
+                  "name": "mcp__web__search",
                   "description": "Search the web for recent news and information",
                   "parameters": {
                     "type": "object",
-                    "properties": {"query": {"type": "string", "description": "Search keywords"}},
-                    "required": ["query"]
+                    "x-mcp-header": {"server": "web", "toolset": "search"},
+                    "properties": {
+                      "query": {"type": ["string", "null"], "description": "Search keywords"},
+                      "limit": {"type": "number", "const": 5},
+                      "options": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {"safe": {"type": "boolean", "default": false}}
+                      }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
                   }
                 }
               }]

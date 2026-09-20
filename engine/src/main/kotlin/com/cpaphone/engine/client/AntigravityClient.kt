@@ -1,5 +1,6 @@
 package com.cpaphone.engine.client
 
+import com.cpaphone.core.translator.GeminiSchemaCleaner
 import com.cpaphone.core.translator.UnifiedChatRequest
 import com.cpaphone.core.translator.UnifiedContentPart
 import com.cpaphone.core.translator.UnifiedRole
@@ -177,7 +178,8 @@ class AntigravityClient {
                                 addJsonObject {
                                     put("name", tool.name)
                                     if (tool.description.isNotBlank()) put("description", tool.description)
-                                    put("parameters", tool.parametersSchemaJson)
+                                    // MCP/OpenAI schema 含上游 proto 不认识的扩展字段（x-mcp-header 等），必须清洗
+                                    put("parameters", GeminiSchemaCleaner.clean(tool.parametersSchemaJson))
                                 }
                             }
                         }
