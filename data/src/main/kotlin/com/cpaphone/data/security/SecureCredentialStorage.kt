@@ -10,19 +10,22 @@ import androidx.security.crypto.MasterKey
  * 利用 Android Keystore 硬件 TEE/StrongBox 生成主密钥，
  * 使用 AES-256-GCM 保护 OAuth Token、Refresh Token、GCP 服务账号 JSON 与原生 API Key。
  */
-open class SecureCredentialStorage(context: Context) {
+open class SecureCredentialStorage(private val context: Context?) {
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-
-    private val securePrefs: SharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        "cpa_secure_vault",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    // 惰性初始化：测试替身可传入 null Context 并覆盖读写方法，永不触碰 Keystore
+    private val securePrefs: SharedPreferences by lazy {
+        val ctx = context ?: throw IllegalStateException("SecureCredentialStorage 缺少 Context，无法初始化加密存储")
+        val masterKey = MasterKey.Builder(ctx)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            ctx,
+            "cpa_secure_vault",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
 
     /**
      * 安全保存敏感 API Key 或 Token

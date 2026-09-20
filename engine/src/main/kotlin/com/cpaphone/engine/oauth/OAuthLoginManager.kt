@@ -54,12 +54,18 @@ class OAuthLoginManager(
         return when (spec.flowKind) {
             OAuthFlowKind.CODE_PKCE, OAuthFlowKind.CODE_SECRET -> {
                 val session = sessionManager.startSession(provider, spec)
-                callbackServer.start(spec.callbackPort) { code, state, error ->
-                    if (state == null || state == session.state) {
-                        backgroundScope.launch {
-                            handleCallbackCode(session.state, code, error)
+                try {
+                    callbackServer.start(spec.callbackPort) { code, state, error ->
+                        if (state == null || state == session.state) {
+                            backgroundScope.launch {
+                                handleCallbackCode(session.state, code, error)
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    // 端口被占用等绑定失败：显式落盘到会话，不再静默导致回跳超时
+                    sessionManager.failSession(session.state, e.message ?: "回调端口绑定失败")
+                    throw e
                 }
                 // 超时兜底：5 分钟未完成授权自动结束会话并释放回调端口
                 backgroundScope.launch {

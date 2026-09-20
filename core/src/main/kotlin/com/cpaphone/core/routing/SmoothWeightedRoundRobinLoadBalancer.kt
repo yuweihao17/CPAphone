@@ -16,8 +16,9 @@ class SmoothWeightedRoundRobinLoadBalancer : LoadBalancer {
     override fun select(candidates: List<AuthCredential>): AuthCredential? {
         val available = candidates.filter { it.isAvailable }
         if (available.isEmpty()) return null
-        if (available.size == 1) return available[0]
 
+        // 注意：单候选路径也必须更新权重状态，否则冷却故障转移会造成状态偏移，
+        // 导致恢复后调度顺序与权重语义不符
         lock.withLock {
             var totalWeight = 0
             var bestCandidate: AuthCredential? = null

@@ -14,6 +14,11 @@ android {
         consumerProguardFiles("consumer-rules.pro")
     }
 
+    testOptions {
+        // 桌面 JVM 单测中 android.jar stub 方法（如 android.util.Log）返回默认值而非抛异常
+        unitTests { isReturnDefaultValues = true }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

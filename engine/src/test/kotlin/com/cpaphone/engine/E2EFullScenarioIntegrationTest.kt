@@ -193,10 +193,7 @@ class E2EFullScenarioIntegrationTest {
     }
 
     private class MockSecureStorage : com.cpaphone.data.security.SecureCredentialStorage(
-        context = java.lang.reflect.Proxy.newProxyInstance(
-            android.content.Context::class.java.classLoader,
-            arrayOf(android.content.Context::class.java)
-        ) { _, _, _ -> null } as android.content.Context
+        context = null
     ) {
         override fun getSecret(credentialId: String): String = "mock-secret"
     }
