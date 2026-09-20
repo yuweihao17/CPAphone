@@ -13,6 +13,7 @@ import com.cpaphone.engine.plugin.NativePluginHost
 import com.cpaphone.engine.remote.RemoteManagementClient
 import com.cpaphone.engine.server.LocalProxyServer
 import com.cpaphone.engine.service.CpaProxyService
+import kotlinx.coroutines.launch
 
 /**
  * 全局应用上下文与轻量级单例组装器 (Zero Overhead DI)
@@ -64,6 +65,13 @@ class CpaApplication : Application() {
         remoteClient = RemoteManagementClient("http://127.0.0.1:8317", "")
         nsdDiscoveryManager = NsdDiscoveryManager(this)
         nativePluginHost = NativePluginHost(this)
+
+        // 网关鉴权 api-keys 接线：后台常驻收集配置流，内存缓存实时生效
+        val apiKeysCache = java.util.concurrent.atomic.AtomicReference<Set<String>>(emptySet())
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            appConfigRepository.configFlow.collect { apiKeysCache.set(it.apiKeys.toSet()) }
+        }
+        localProxyServer.setApiKeysProvider { apiKeysCache.get() }
 
         // 绑定静态服务实例
         CpaProxyService.activeServerInstance = localProxyServer

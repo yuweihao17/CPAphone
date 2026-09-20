@@ -26,6 +26,7 @@ data class AppConfig(
     val safeModeEnabled: Boolean = true,
     val enableCloaking: Boolean = true,          // 客户端指纹伪装与请求披风开关
     val enableLanDiscovery: Boolean = true,      // 局域网服务广播与设备雷达发现开关
+    val apiKeys: List<String> = emptyList(),     // 网关鉴权 api-keys（空列表=不启用鉴权）
     val connectTimeoutMs: Long = 15_000L,        // 上游连接超时 (毫秒)
     val requestTimeoutMs: Long = 120_000L,       // 上游总请求超时 (毫秒)
     val outboundProxyUrl: String? = null,
@@ -45,6 +46,7 @@ class AppConfigRepository(private val context: Context) {
         val SAFE_MODE_ENABLED = booleanPreferencesKey("safe_mode_enabled")
         val ENABLE_CLOAKING = booleanPreferencesKey("enable_cloaking")
         val ENABLE_LAN_DISCOVERY = booleanPreferencesKey("enable_lan_discovery")
+        val API_KEYS = stringPreferencesKey("api_keys")
         val CONNECT_TIMEOUT_MS = longPreferencesKey("connect_timeout_ms")
         val REQUEST_TIMEOUT_MS = longPreferencesKey("request_timeout_ms")
         val OUTBOUND_PROXY_URL = stringPreferencesKey("outbound_proxy_url")
@@ -67,6 +69,7 @@ class AppConfigRepository(private val context: Context) {
             safeModeEnabled = prefs[PreferencesKeys.SAFE_MODE_ENABLED] ?: true,
             enableCloaking = prefs[PreferencesKeys.ENABLE_CLOAKING] ?: true,
             enableLanDiscovery = prefs[PreferencesKeys.ENABLE_LAN_DISCOVERY] ?: true,
+            apiKeys = prefs[PreferencesKeys.API_KEYS]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
             connectTimeoutMs = prefs[PreferencesKeys.CONNECT_TIMEOUT_MS] ?: 15_000L,
             requestTimeoutMs = prefs[PreferencesKeys.REQUEST_TIMEOUT_MS] ?: 120_000L,
             outboundProxyUrl = prefs[PreferencesKeys.OUTBOUND_PROXY_URL],
@@ -103,6 +106,17 @@ class AppConfigRepository(private val context: Context) {
 
     suspend fun updateLanDiscovery(enabled: Boolean) {
         context.dataStore.edit { it[PreferencesKeys.ENABLE_LAN_DISCOVERY] = enabled }
+    }
+
+    suspend fun updateApiKeys(keys: List<String>) {
+        context.dataStore.edit {
+            val normalized = keys.map { it.trim() }.filter { it.isNotEmpty() }
+            if (normalized.isEmpty()) {
+                it.remove(PreferencesKeys.API_KEYS)
+            } else {
+                it[PreferencesKeys.API_KEYS] = normalized.joinToString(",")
+            }
+        }
     }
 
     suspend fun updateTimeouts(connectTimeoutMs: Long, requestTimeoutMs: Long) {

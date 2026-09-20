@@ -21,8 +21,20 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -64,6 +76,13 @@ class LocalProxyServer(
     private var stateListener: ProxyServerStateListener? = null
     private var serverScope: CoroutineScope? = null
     private var safeModeEnabled = true
+    private val gatewayAuth = GatewayAuthMiddleware { apiKeysProvider() }
+    private var apiKeysProvider: () -> Set<String> = { emptySet() }
+
+    /** 注入网关鉴权 api-keys 提供者（由应用层接线 DataStore 配置） */
+    fun setApiKeysProvider(provider: () -> Set<String>) {
+        apiKeysProvider = provider
+    }
 
     fun setStateListener(listener: ProxyServerStateListener?) {
         this.stateListener = listener
@@ -98,13 +117,16 @@ class LocalProxyServer(
                 allowMethod(HttpMethod.Get)
             }
 
+            // 网关鉴权层（api-keys 未配置时放行；/healthz 与 management 平面豁免）
+            gatewayAuth.installInto(this)
+
             routing {
                 // 健康检查端点
                 get("/healthz") {
                     call.respondText("{\"status\":\"ok\",\"service\":\"CPAphone\"}", ContentType.Application.Json)
                 }
 
-                // OpenAI 模型列表聚合端点
+                // OpenAI 模型列表聚合端点（按客户端协议分流：Claude 客户端得 Claude 格式）
                 get("/v1/models") {
                     handleModels(call)
                 }
@@ -118,6 +140,15 @@ class LocalProxyServer(
                     handleChatCompletions(call, inboundProtocol = "openai")
                 }
 
+                // OpenAI 文本补全端点（prompt → chat 管道 → text_completion 格式，对齐 CLIProxyAPI）
+                post("/v1/completions") {
+                    if (isSafeModeBlocked(call)) {
+                        respondSafeModeBlocked(call)
+                        return@post
+                    }
+                    handleCompletions(call)
+                }
+
                 // Anthropic Messages 核心代理端点 (支持客户端直连 /v1/messages)
                 post("/v1/messages") {
                     if (isSafeModeBlocked(call)) {
@@ -127,21 +158,39 @@ class LocalProxyServer(
                     handleChatCompletions(call, inboundProtocol = "claude")
                 }
 
-                // Google Gemini 规范兼容端点（:generateContent / :streamGenerateContent）
+                // Anthropic count_tokens 端点（Claude 凭据原生透传，其他凭据估算）
+                post("/v1/messages/count_tokens") {
+                    handleCountTokens(call, inboundProtocol = "claude")
+                }
+
+                // Google Gemini 规范兼容端点（:generateContent / :streamGenerateContent / :countTokens）
                 post("/v1beta/models/{model...}") {
                     if (isSafeModeBlocked(call)) {
                         respondSafeModeBlocked(call)
                         return@post
                     }
-                    val pathModel = call.parameters["model..."] ?: ""
+                    // Ktor tailcard 参数键随版本可能为 "model..." 或 "model"，两者兼容
+                    val pathModel = call.parameters["model..."] ?: call.parameters["model"] ?: ""
                     val model = pathModel.substringBefore(':').substringAfterLast('/')
                     val action = pathModel.substringAfter(':', "").substringBefore('?')
-                    handleChatCompletions(
-                        call,
-                        inboundProtocol = "gemini",
-                        geminiModel = model,
-                        geminiAction = action
-                    )
+                    when (action) {
+                        "generateContent", "streamGenerateContent", "" -> handleChatCompletions(
+                            call,
+                            inboundProtocol = "gemini",
+                            geminiModel = model,
+                            geminiAction = action
+                        )
+                        "countTokens" -> handleCountTokens(call, inboundProtocol = "gemini", geminiModel = model)
+                        else -> call.respondText(
+                            """{"error":{"message":"Unsupported Gemini action [$action]","type":"invalid_request_error","code":404}}""",
+                            ContentType.Application.Json, HttpStatusCode.NotFound
+                        )
+                    }
+                }
+
+                // Gemini 规范模型列表
+                get("/v1beta/models") {
+                    handleModels(call)
                 }
 
                 // =========================================================================
@@ -193,17 +242,23 @@ class LocalProxyServer(
                 }
                 kotlinx.coroutines.delay(100)
             }
+            // 状态回调统一在主线程分发；桌面 JVM 测试环境无 Main dispatcher 时降级当前线程
+            suspend fun notify(running: Boolean) {
+                try {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        stateListener?.onStateChanged(running, host, port)
+                    }
+                } catch (_: IllegalStateException) {
+                    stateListener?.onStateChanged(running, host, port)
+                }
+            }
             if (!verified) {
                 engine.stop(0, 500)
                 if (server === engine) server = null
                 isRunning.set(false)
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    stateListener?.onStateChanged(false, host, port)
-                }
+                notify(false)
             } else {
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    stateListener?.onStateChanged(true, host, port)
-                }
+                notify(true)
             }
         }
         isRunning.set(true)
@@ -301,8 +356,12 @@ class LocalProxyServer(
     }
 
     private suspend fun handleModels(call: ApplicationCall) {
-        // 对齐 CLIProxyAPI：/v1/models 按「凭据池中实际存在的提供商」动态聚合，
-        // 不再返回与凭据无关的静态清单（登录 Antigravity 即只见 gemini/antigravity 系模型）
+        // 对齐 CLIProxyAPI unifiedModelsHandler：按客户端协议分流响应格式
+        val userAgent = call.request.header(HttpHeaders.UserAgent) ?: ""
+        val anthropicVersion = call.request.header("Anthropic-Version")
+        val isClaudeClient = anthropicVersion != null || userAgent.contains("claude-cli", ignoreCase = true)
+
+        // 对齐 CLIProxyAPI：/v1/models 按「凭据池中实际存在的提供商」动态聚合
         val credentials = credentialRepository?.getAllCredentials().orEmpty()
         val providers = credentials
             .filter { it.status != com.cpaphone.core.model.CredentialStatus.DISABLED }
@@ -313,12 +372,22 @@ class LocalProxyServer(
             .flatMap { it.modelAliases.entries }
             .associate { it.key to it.value }
 
-        val data = com.cpaphone.core.model.ModelCatalog
+        val models = com.cpaphone.core.model.ModelCatalog
             .aggregateForProviders(providers, compatAliases)
-            .joinToString(",") { (id, ownedBy) ->
+
+        if (isClaudeClient) {
+            // Claude 格式：{"data":[{"id","display_name","type":"model"}]}
+            val data = models.joinToString(",") { (id, _) ->
+                """{"id":"$id","display_name":"$id","type":"model"}"""
+            }
+            call.respondText("""{"data":[$data]}""", ContentType.Application.Json)
+        } else {
+            // OpenAI 格式：{"data":[{"id","object":"model","owned_by"}]}
+            val data = models.joinToString(",") { (id, ownedBy) ->
                 """{"id":"$id","object":"model","owned_by":"$ownedBy"}"""
             }
-        call.respondText("""{"object":"list","data":[$data]}""", ContentType.Application.Json)
+            call.respondText("""{"object":"list","data":[$data]}""", ContentType.Application.Json)
+        }
     }
 
     private suspend fun handleChatCompletions(
@@ -327,11 +396,121 @@ class LocalProxyServer(
         geminiModel: String? = null,
         geminiAction: String? = null
     ) {
+        val rawBody = call.receiveText()
+        handleChatRequest(call, inboundProtocol, rawBody, completionsMode = false, geminiModel = geminiModel, geminiAction = geminiAction)
+    }
+
+    /** 协议感知错误响应：Claude 入站用 {"type":"error",...}，OpenAI/Gemini 入站用 {"error":{...}} */
+    private suspend fun respondProtocolError(
+        call: ApplicationCall,
+        inboundProtocol: String,
+        status: HttpStatusCode,
+        message: String,
+        errorType: String,
+        code: Int
+    ) {
+        val safeMessage = message.replace("\"", "'")
+        val payload = if (inboundProtocol == "claude") {
+            """{"type":"error","error":{"type":"$errorType","message":"$safeMessage"}}"""
+        } else {
+            """{"error":{"message":"$safeMessage","type":"$errorType","code":$code}}"""
+        }
+        call.respondText(payload, ContentType.Application.Json, status)
+    }
+
+    /**
+     * OpenAI 文本补全端点（对齐 CLIProxyAPI openai_handlers.go:157-314）
+     * prompt → 单条 user 消息走 chat 管道 → 响应转回 text_completion 格式
+     */
+    private suspend fun handleCompletions(call: ApplicationCall) {
+        val rawBody = call.receiveText()
+        val parsed = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(rawBody).jsonObject
+        } catch (_: Exception) {
+            respondProtocolError(call, "openai", HttpStatusCode.BadRequest, "Invalid JSON request body", "invalid_request_error", 400)
+            return
+        }
+        val prompt = when (val p = parsed["prompt"]) {
+            is kotlinx.serialization.json.JsonPrimitive -> p.content
+            is kotlinx.serialization.json.JsonArray -> p.mapNotNull {
+                (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+            }.joinToString("\n")
+            else -> ""
+        }.ifBlank { "Complete this:" }
+
+        val model = parsed["model"]?.jsonPrimitive?.content ?: "unknown"
+        val userMessage = buildJsonObject {
+            put("role", "user")
+            put("content", prompt)
+        }
+        val chatBody = buildJsonObject {
+            put("model", model)
+            putJsonArray("messages") { add(userMessage) }
+            parsed["max_tokens"]?.let { put("max_tokens", it) }
+            parsed["temperature"]?.let { put("temperature", it) }
+            parsed["top_p"]?.let { put("top_p", it) }
+            // 补全端点降级为非流式调用后单帧输出，保证 text_completion 语义完整
+            put("stream", false)
+        }.toString()
+
+        handleChatRequest(call, "openai", chatBody, completionsMode = true)
+    }
+
+    /**
+     * count_tokens 端点（对齐 CLIProxyAPI：Claude 凭据原生透传，其他凭据按 chars/4 估算）
+     */
+    private suspend fun handleCountTokens(call: ApplicationCall, inboundProtocol: String, geminiModel: String? = null) {
+        val rawBody = call.receiveText()
+
+        // 尝试 Claude 凭据原生透传（count_tokens 是 Anthropic 原生能力）
+        val claudeCred = credentialRepository?.getAllCredentials().orEmpty()
+            .firstOrNull {
+                it.provider == ProviderType.CLAUDE &&
+                    it.status == com.cpaphone.core.model.CredentialStatus.ACTIVE
+            }
+        if (claudeCred != null) {
+            val secretKey = credentialRepository?.getSecretKey(claudeCred.id) ?: ""
+            val result = upstreamClient.execute(
+                credential = claudeCred,
+                secretKey = secretKey,
+                targetPath = "/v1/messages/count_tokens",
+                method = HttpMethod.Post,
+                requestBody = rawBody,
+                headers = emptyMap(),
+                isStreaming = false
+            )
+            if (result is UpstreamCallResult.Success) {
+                val text = buildString {
+                    while (!result.responseChannel.isClosedForRead) {
+                        append(result.responseChannel.readUTF8Line() ?: break)
+                        append("\n")
+                    }
+                }.trim()
+                call.respondText(text, ContentType.Application.Json, result.statusCode)
+                return
+            }
+        }
+
+        // 估算兜底：serialize 后按 chars/4 粗估 token 数（明确标注 estimated）
+        val model = geminiModel ?: try {
+            kotlinx.serialization.json.Json.parseToJsonElement(rawBody).jsonObject["model"]?.jsonPrimitive?.content ?: "unknown"
+        } catch (_: Exception) { "unknown" }
+        val estimate = rawBody.length / 4
+        call.respondText("""{"input_tokens":$estimate,"estimated":true,"model":"$model"}""", ContentType.Application.Json)
+    }
+
+    private suspend fun handleChatRequest(
+        call: ApplicationCall,
+        inboundProtocol: String,
+        rawBody: String,
+        completionsMode: Boolean,
+        geminiModel: String? = null,
+        geminiAction: String? = null
+    ) {
         val startTime = System.currentTimeMillis()
         val traceId = "cpa-" + UUID.randomUUID().toString().substring(0, 8)
         totalRequestsCount.incrementAndGet()
 
-        val rawBody = call.receiveText()
         val parsedRequest = try {
             when (inboundProtocol) {
                 "claude" -> ProtocolTranslatorEngine.parseClaudeMessagesRequest(rawBody)
@@ -342,10 +521,7 @@ class LocalProxyServer(
                 else -> ProtocolTranslatorEngine.parseOpenAiChatRequest(rawBody)
             }
         } catch (_: Exception) {
-            call.respond(
-                HttpStatusCode.BadRequest,
-                "{\"error\":{\"message\":\"Invalid JSON request body\",\"type\":\"invalid_request_error\"}}"
-            )
+            respondProtocolError(call, inboundProtocol, HttpStatusCode.BadRequest, "Invalid JSON request body", "invalid_request_error", 400)
             return
         }
 
@@ -428,34 +604,31 @@ class LocalProxyServer(
         }
 
         val duration = System.currentTimeMillis() - startTime
+        val inbound = inboundProtocolOf(inboundProtocol)
+        val outbound = outboundProtocolOf(chosenCredential?.provider ?: ProviderType.OPENAI_COMPATIBLE)
 
         // 处理最终输出：协议一致零拷贝透传；跨协议走全矩阵转译（对齐 CLIProxyAPI translator 注册表）
         when (finalResult) {
-            is UpstreamCallResult.Success -> {
-                val provider = chosenCredential?.provider ?: ProviderType.OPENAI_COMPATIBLE
-                val inbound = inboundProtocolOf(inboundProtocol)
-                val outbound = outboundProtocolOf(provider)
-
-                if (inbound == outbound && !parsedRequest.isStreaming) {
-                    // 协议一致 + 非流式：零拷贝透传
-                    call.response.status(finalResult.statusCode)
-                    call.response.headers.append("X-Cpa-Trace-Id", traceId)
-                    call.respondBytesWriter { finalResult.responseChannel.copyTo(this) }
-                } else if (inbound == outbound) {
+            is UpstreamCallResult.Success -> when {
+                inbound == outbound && !completionsMode && parsedRequest.isStreaming -> {
                     // 协议一致 + 流式：零拷贝透传
                     call.response.status(finalResult.statusCode)
                     call.response.headers.append(HttpHeaders.ContentType, "text/event-stream; charset=utf-8")
                     call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
                     call.response.headers.append("X-Cpa-Trace-Id", traceId)
                     call.respondBytesWriter { finalResult.responseChannel.copyTo(this) }
-                } else if (parsedRequest.isStreaming) {
+                }
+                inbound == outbound && !completionsMode -> {
+                    // 协议一致 + 非流式：零拷贝透传
+                    call.response.status(finalResult.statusCode)
+                    call.response.headers.append("X-Cpa-Trace-Id", traceId)
+                    call.respondBytesWriter { finalResult.responseChannel.copyTo(this) }
+                }
+                parsedRequest.isStreaming -> {
                     // 跨协议流式：有状态转换器逐行实时转译
                     val converter = streamConverterFor(inbound, outbound, parsedRequest.model)
                     if (converter == null) {
-                        call.respondText(
-                            "{\"error\":{\"message\":\"Unsupported protocol pair\",\"type\":\"server_error\",\"code\":500}}",
-                            ContentType.Application.Json, HttpStatusCode.InternalServerError
-                        )
+                        respondProtocolError(call, inboundProtocol, HttpStatusCode.InternalServerError, "Unsupported protocol pair", "server_error", 500)
                         return
                     }
                     call.response.status(finalResult.statusCode)
@@ -479,33 +652,31 @@ class LocalProxyServer(
                             flush()
                         }
                     }
-                } else {
-                    // 跨协议非流式：读全文一次性转译
+                }
+                else -> {
+                    // 读全文：跨协议非流式转译 或 completionsMode 的 text_completion 包装
                     val upstreamText = buildString {
                         while (!finalResult.responseChannel.isClosedForRead) {
                             append(finalResult.responseChannel.readUTF8Line() ?: break)
                             append("\n")
                         }
                     }.trim()
-                    val translated = CrossProtocolResponseTranslator.translate(
-                        upstreamText, outbound, inbound, parsedRequest.model
-                    )
+                    val finalJson = if (inbound != outbound) {
+                        CrossProtocolResponseTranslator.translate(upstreamText, outbound, inbound, parsedRequest.model)
+                    } else {
+                        upstreamText
+                    }
+                    val payload = if (completionsMode) {
+                        wrapTextCompletion(finalJson, parsedRequest.model)
+                    } else {
+                        finalJson
+                    }
                     call.response.status(finalResult.statusCode)
                     call.response.headers.append("X-Cpa-Trace-Id", traceId)
-                    call.respondText(translated, ContentType.Application.Json)
+                    call.respondText(payload, ContentType.Application.Json)
                 }
-
-                recordTrace(
-                    traceId = traceId,
-                    model = parsedRequest.model,
-                    credential = chosenCredential,
-                    statusCode = 200,
-                    durationMs = duration,
-                    isStreaming = parsedRequest.isStreaming,
-                    retryCount = retryCount,
-                    errorMessage = null
-                )
             }
+
             is UpstreamCallResult.Error -> {
                 val errorPayload = buildJsonObject {
                     putJsonObject("error") {
@@ -528,15 +699,11 @@ class LocalProxyServer(
                 )
             }
             null -> {
-                val poolErrorPayload = buildJsonObject {
-                    putJsonObject("error") {
-                        put("message", "All available credentials in pool are cooling, exhausted, or unavailable for model [${parsedRequest.model}]")
-                        put("type", "pool_exhausted")
-                        put("code", 503)
-                    }
-                }.toString()
-
-                call.respondText(poolErrorPayload, ContentType.Application.Json, HttpStatusCode.ServiceUnavailable)
+                respondProtocolError(
+                    call, inboundProtocol, HttpStatusCode.ServiceUnavailable,
+                    "All available credentials in pool are cooling, exhausted, or unavailable for model [${parsedRequest.model}]",
+                    "pool_exhausted", 503
+                )
                 recordTrace(
                     traceId = traceId,
                     model = parsedRequest.model,
@@ -549,6 +716,35 @@ class LocalProxyServer(
                 )
             }
         }
+    }
+
+    /**
+     * OpenAI chat.completion 响应 → text_completion 格式（/v1/completions 出站包装）
+     */
+    private fun wrapTextCompletion(chatJson: String, model: String): String {
+        val chat = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(chatJson).jsonObject
+        } catch (_: Exception) {
+            return chatJson
+        }
+        val choice = (chat["choices"] as? kotlinx.serialization.json.JsonArray)?.firstOrNull() as? JsonObject
+        val text = (choice?.get("message") as? JsonObject)?.get("content")
+            ?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: ""
+        val finish = choice?.get("finish_reason")?.jsonPrimitive?.contentOrNull ?: "stop"
+        return buildJsonObject {
+            put("id", "cmpl-${UUID.randomUUID().toString().replace("-", "").take(24)}")
+            put("object", "text_completion")
+            put("created", System.currentTimeMillis() / 1000)
+            put("model", model)
+            putJsonArray("choices") {
+                addJsonObject {
+                    put("index", 0)
+                    put("text", text)
+                    put("finish_reason", finish)
+                }
+            }
+            chat["usage"]?.let { put("usage", it) }
+        }.toString()
     }
 
     private suspend fun handleCreateClientSecret(call: ApplicationCall) {

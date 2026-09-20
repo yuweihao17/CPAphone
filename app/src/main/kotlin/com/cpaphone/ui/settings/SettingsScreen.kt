@@ -163,6 +163,43 @@ fun SettingsScreen() {
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
 
+                // 网关鉴权 API Keys 管理（对齐 CLIProxyAPI api-keys；空列表 = 不启用鉴权）
+                var apiKeysInput by remember(config?.apiKeys) {
+                    mutableStateOf(config?.apiKeys?.joinToString(",") ?: "")
+                }
+                Column {
+                    Text(text = "网关鉴权 API Keys", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    Text(
+                        text = "逗号分隔；为空时不启用鉴权。校验 Bearer / x-api-key / x-goog-api-key / ?key=",
+                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = apiKeysInput,
+                        onValueChange = { apiKeysInput = it },
+                        placeholder = { Text("sk-xxx,sk-yyy（逗号分隔）", fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    app.appConfigRepository.updateApiKeys(apiKeysInput.split(",").map { it.trim() }.filter { it.isNotEmpty() })
+                                    Toast.makeText(context, "API Keys 已保存并即时生效", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            enabled = apiKeysInput != (config?.apiKeys?.joinToString(",") ?: "")
+                        ) {
+                            Text("保存 Keys", fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
