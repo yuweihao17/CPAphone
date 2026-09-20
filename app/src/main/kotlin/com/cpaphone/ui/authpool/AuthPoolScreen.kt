@@ -43,6 +43,7 @@ fun AuthPoolScreen() {
     val credentials by app.credentialRepository.getAllCredentialsFlow().collectAsState(initial = emptyList())
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    var manualPasteProvider by remember { mutableStateOf<ProviderType?>(null) }
 
     Scaffold(
         floatingActionButton = {
@@ -130,7 +131,8 @@ fun AuthPoolScreen() {
                             }
                         }
                     },
-                    onCancel = { app.oauthLoginManager.cancelLogin(activeSession?.state ?: "") }
+                    onCancel = { app.oauthLoginManager.cancelLogin(activeSession?.state ?: "") },
+                    onManualPaste = { manualPasteProvider = card.provider }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -197,6 +199,29 @@ fun AuthPoolScreen() {
             }
         )
     }
+
+    // 手动提交回调链接（浏览器被代理拦截导致 localhost 回跳超时时的兜底）
+    manualPasteProvider?.let {
+        ManualCallbackDialog(
+            onDismiss = { manualPasteProvider = null },
+            onSubmit = { raw ->
+                manualPasteProvider = null
+                scope.launch {
+                    val accepted = try {
+                        app.oauthLoginManager.handleManualCallback(raw)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "提交失败：${e.message}", Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    Toast.makeText(
+                        context,
+                        if (accepted) "已提交回调链接，正在完成登录" else "链接无效或登录会话已结束",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
+    }
 }
 
 /** OAuth 快捷登录卡片展示数据（对齐 CPAMC 控制台的 OAuth 登录列表） */
@@ -244,7 +269,8 @@ private fun OAuthLoginCardItem(
     activeSession: OAuthSession?,
     lastResult: OAuthSession?,
     onStart: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onManualPaste: () -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -329,6 +355,21 @@ private fun OAuthLoginCardItem(
                 }
             }
 
+            // 浏览器授权流等待中：代理拦截 localhost 回跳时的自救指引与手动兜底入口
+            if (activeSession != null && activeSession.authorizeUrl != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "若浏览器提示无法访问 localhost：可将地址栏中的 localhost 改为 127.0.0.1 后重新加载；" +
+                            "或复制该页完整网址，点下方按钮提交完成登录",
+                    fontSize = 11.sp,
+                    color = AccentWarning,
+                    lineHeight = 15.sp
+                )
+                TextButton(onClick = onManualPaste, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text("手动粘贴回调链接", fontSize = 12.sp)
+                }
+            }
+
             // 设备码流进行中：展示 user_code 与验证页辅助操作
             val userCode = activeSession?.userCode
             if (userCode != null) {
@@ -364,6 +405,50 @@ private fun OAuthLoginCardItem(
             }
         }
     }
+}
+
+/**
+ * 手动提交回调链接对话框：粘贴浏览器地址栏中的回跳 URL（含 code/state）
+ */
+@Composable
+private fun ManualCallbackDialog(
+    onDismiss: () -> Unit,
+    onSubmit: (rawUrl: String) -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    var rawUrl by remember { mutableStateOf(clipboard.getText()?.toString()?.takeIf { it.contains("code=") } ?: "") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("粘贴回调链接") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "在浏览器无法打开 localhost 页面时：长按该错误页的地址栏复制完整网址，粘贴到此处提交。网址须包含 code= 参数。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+                OutlinedTextField(
+                    value = rawUrl,
+                    onValueChange = { rawUrl = it },
+                    label = { Text("回调链接") },
+                    placeholder = { Text("http://localhost:51121/oauth-callback?code=...", fontSize = 11.sp) },
+                    minLines = 2
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { if (rawUrl.isNotBlank()) onSubmit(rawUrl) },
+                enabled = rawUrl.isNotBlank()
+            ) {
+                Text("提交")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
 
 @Composable

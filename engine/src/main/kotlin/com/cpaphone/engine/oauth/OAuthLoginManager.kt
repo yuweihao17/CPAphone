@@ -138,6 +138,36 @@ class OAuthLoginManager(
     }
 
     /**
+     * 手动提交回调链接（浏览器被代理拦截导致 localhost 回跳超时时的兜底通道）
+     * 用户从浏览器地址栏复制完整回跳 URL（含 code/state），粘贴后在此解析并完成兑换
+     * 对齐 CLIProxyAPI 管理端点 /v0/management/oauth-callback 的手动 redirect_url 模式
+     *
+     * @return 是否成功受理（找到会话且参数合法）
+     */
+    suspend fun handleManualCallback(rawUrl: String): Boolean {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isBlank()) return false
+
+        val (code, state, error) = try {
+            val uri = android.net.Uri.parse(trimmed)
+            Triple(
+                uri.getQueryParameter("code"),
+                uri.getQueryParameter("state"),
+                uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
+            )
+        } catch (_: Exception) {
+            return false
+        }
+        if (state.isNullOrBlank()) return false
+
+        val session = sessionManager.peek(state) ?: return false
+        if (session.status != com.cpaphone.core.session.OAuthFlowStatus.WAIT) return false
+
+        handleCallbackCode(state, code, error)
+        return true
+    }
+
+    /**
      * 用 refresh_token 刷新某凭据的 access_token（供 CredentialCoordinator 自动续期）
      * @return 是否刷新成功
      */
